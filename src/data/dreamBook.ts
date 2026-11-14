@@ -1,4 +1,4 @@
-import { DreamEntry } from '../types/lottery';
+import type { DreamEntry } from '../types/lottery.ts';
 
 export const DREAM_BOOK_ENTRIES: DreamEntry[] = [
   { id: 1, keyword: 'Mơ thấy rắn', numbers: ['32', '42', '72'], category: 'Con vật' },

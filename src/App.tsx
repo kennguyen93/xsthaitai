@@ -122,6 +122,7 @@ export function App() {
   const [dbRows, setDbRows] = useState<DbLotteryRow[]>([]);
   const [loadingResults, setLoadingResults] = useState<boolean>(true);
   const [resultsError, setResultsError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState<number>(0);
   const [seoList, setSeoList] = useState<SeoRow[]>([]);
 
   useEffect(() => {
@@ -218,7 +219,7 @@ export function App() {
         )
       )
       .finally(() => setLoadingResults(false));
-  }, [selectedDate]);
+  }, [selectedDate, reloadKey]);
 
   const xsmbResult = useMemo(() => {
     const row = dbRows.find((r) => r.region === 'MB');
@@ -308,8 +309,15 @@ export function App() {
                 activeTab === 'xsmb' ||
                 activeTab === 'xsmn' ||
                 activeTab === 'xsmt') && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800">
-                  {resultsError}
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800 flex items-center justify-between gap-3">
+                  <span>{resultsError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setReloadKey((k) => k + 1)}
+                    className="px-3 py-1.5 text-xs font-semibold bg-white border border-red-300 text-red-700 hover:bg-red-100 rounded-md shrink-0 cursor-pointer"
+                  >
+                    Thử lại
+                  </button>
                 </div>
               )}
 

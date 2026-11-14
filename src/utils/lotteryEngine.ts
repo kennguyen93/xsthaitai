@@ -5,8 +5,8 @@ import {
   XSMN_MT_PRIZE_PAYOUTS,
   XSMN_SCHEDULE,
   XSMT_SCHEDULE,
-} from '../data/lotterySchedule';
-import {
+} from '../data/lotterySchedule.ts';
+import type {
   DigitDisplayMode,
   LotoStatItem,
   ProvinceDrawResult,
@@ -17,7 +17,7 @@ import {
   VietlottMegaResult,
   VietlottPowerResult,
   XSMBResult,
-} from '../types/lottery';
+} from '../types/lottery.ts';
 
 // Deterministic hash + PRNG (Mulberry32) so any date + province code always gives identical authentic draws
 function hashString(str: string): number {

@@ -1,4 +1,4 @@
-import { ProvinceInfo } from '../types/lottery';
+import type { ProvinceInfo } from '../types/lottery.ts';
 
 export const DAY_NAMES_VI: Record<number, string> = {
   0: 'Chủ Nhật',
