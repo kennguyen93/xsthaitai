@@ -5,6 +5,7 @@ import {
   Clock,
   Database,
   Download,
+  ExternalLink,
   Lock,
   LogIn,
   LogOut,
@@ -133,8 +134,18 @@ interface BackupRow {
 }
 
 export const AdminDashboard: React.FC = () => {
-  const { firebaseUser, profile, loading, authError, getToken, loginWithGoogle, logout } =
-    useAuth();
+  const {
+    firebaseUser,
+    profile,
+    loading,
+    authError,
+    popupBlocked,
+    inIframe,
+    getToken,
+    loginWithGoogle,
+    loginWithRedirect,
+    logout,
+  } = useAuth();
 
   const [tab, setTab] = useState<'overview' | 'results' | 'api' | 'seo' | 'ads'>('overview');
   const [overview, setOverview] = useState<AdminOverview | null>(null);
@@ -261,18 +272,46 @@ export const AdminDashboard: React.FC = () => {
           Khu vực quản lý kết quả xổ số, đồng bộ xosovnm.net, cấu hình SEO, quảng cáo và sao lưu dữ liệu lịch sử 10 năm.
         </p>
         {authError && (
-          <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded">
-            {authError}
+          <div className="p-3 text-xs text-left text-red-700 bg-red-50 border border-red-200 rounded space-y-1.5">
+            <p className="font-medium">{authError}</p>
+            {popupBlocked && (
+              <p className="text-slate-600">
+                Mẹo: Nhấn biểu tượng chặn cửa sổ bật lên trên thanh địa chỉ trình duyệt → chọn{' '}
+                <span className="font-semibold">Luôn cho phép cửa sổ bật lên</span>, hoặc mở trực tiếp ở tab mới.
+              </p>
+            )}
           </div>
         )}
-        <button
-          type="button"
-          onClick={loginWithGoogle}
-          className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-[#C8102E] hover:bg-[#A60D26] rounded-md cursor-pointer"
-        >
-          <LogIn className="w-4 h-4" />
-          Đăng nhập bằng Google
-        </button>
+        <div className="flex flex-wrap items-center justify-center gap-2.5">
+          <button
+            type="button"
+            onClick={loginWithGoogle}
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-[#C8102E] hover:bg-[#A60D26] rounded-md cursor-pointer"
+          >
+            <LogIn className="w-4 h-4" />
+            Đăng nhập bằng Google
+          </button>
+          {(popupBlocked || inIframe) && (
+            <a
+              href={typeof window !== 'undefined' ? window.location.href : '/admin'}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md"
+            >
+              <ExternalLink className="w-4 h-4" />
+              Mở ở tab mới
+            </a>
+          )}
+          {!inIframe && popupBlocked && (
+            <button
+              type="button"
+              onClick={loginWithRedirect}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md cursor-pointer"
+            >
+              Đăng nhập chuyển hướng
+            </button>
+          )}
+        </div>
       </section>
     );
   }
