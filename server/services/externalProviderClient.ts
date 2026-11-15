@@ -94,6 +94,8 @@ export function resolveBackendApiAuth(provider: ProviderConfigInput): ApiAuthOpt
   };
 }
 
+export const XOSOVNM_API_BASE = 'https://api.xosovnm.net/api';
+
 export async function fetchRegionDrawsFromProvider(
   provider: ProviderConfigInput,
   region: 'MB' | 'MN' | 'MT',
@@ -102,69 +104,20 @@ export async function fetchRegionDrawsFromProvider(
 ): Promise<ProviderFetchResult> {
   const auth = resolveBackendApiAuth(provider);
   const dow = getDayOfWeekUTC(targetDate);
+  const baseUrl = XOSOVNM_API_BASE;
 
-  if (provider.adapterType === 'generic-json') {
-    const rate = checkAndConsumeRateLimit(provider.providerKey, provider.rateLimitPerMin);
-    if (!rate.allowed) {
-      throw new ExternalApiError(
-        `Vượt giới hạn tốc độ API (${rate.limit} req/phút) cho ${provider.name}, thử lại sau ${rate.retryAfterSec}s.`,
-        429,
-        provider.baseUrl
-      );
-    }
-    const cleanBase = provider.baseUrl.replace(/\/+$/, '');
-    const rawPath = (provider.customEndpointPath || '/results').trim();
-    const normalizedPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
-    const url = `${cleanBase}${normalizedPath}?region=${encodeURIComponent(
-      region
-    )}&date=${encodeURIComponent(targetDate)}`;
-
-    const { body, status, endpointUrl } = await fetchJsonWithTimeout<{
-      data?: unknown[];
-      results?: unknown[];
-    }>(url, provider.timeoutMs, auth);
-
-    const rawList = Array.isArray(body?.data)
-      ? body.data
-      : Array.isArray(body?.results)
-      ? body.results
-      : [];
-
-    const draws: ExternalApiDraw[] = rawList
-      .map((entry) => {
-        const obj = entry as Record<string, unknown>;
-        const code = String(obj.provinceCode || obj.code || '').toUpperCase();
-        const name = String(obj.provinceName || obj.name || code);
-        const prizes = (obj.prizes && typeof obj.prizes === 'object'
-          ? obj.prizes
-          : {}) as Record<string, string[]>;
-        const kyHieu = Array.isArray(obj.kyHieu) ? obj.kyHieu.map(String) : [];
-        if (!code) return null;
-        return {
-          provinceCode: code,
-          provinceName: name,
-          region,
-          kyHieu,
-          prizes,
-        } as ExternalApiDraw;
-      })
-      .filter((d): d is ExternalApiDraw => d !== null);
-
-    return { draws, httpStatus: status, endpointUrl, requestsMade: 1 };
-  }
-
-  // Primary XosoVNM.net adapter
+  // Strictly use https://api.xosovnm.net/api
   if (region === 'MB') {
     const rate = checkAndConsumeRateLimit(provider.providerKey, provider.rateLimitPerMin);
     if (!rate.allowed) {
       throw new ExternalApiError(
         `Vượt giới hạn tốc độ API (${rate.limit} req/phút) cho ${provider.name}, thử lại sau ${rate.retryAfterSec}s.`,
         429,
-        provider.baseUrl
+        baseUrl
       );
     }
     const { item, httpStatus, endpointUrl } = await fetchXosoVNMMienBac(
-      provider.baseUrl,
+      baseUrl,
       targetDate,
       provider.timeoutMs,
       auth

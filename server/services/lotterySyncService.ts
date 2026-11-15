@@ -1,5 +1,5 @@
 import os from 'os';
-import { and, count, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../../src/db/index.ts';
 import {
   advertisements,
@@ -82,7 +82,8 @@ export async function ensureDatabaseSeeded(): Promise<void> {
         await db.insert(lotteryProvinces).values(provs).onConflictDoNothing();
       }
 
-      // Register xosovnm.net as the default active external API provider
+      // Enforce https://api.xosovnm.net/api as the sole external API provider
+      await db.delete(apiProviders).where(ne(apiProviders.providerKey, 'xosovnm'));
       await db
         .insert(apiProviders)
         .values([
@@ -90,7 +91,7 @@ export async function ensureDatabaseSeeded(): Promise<void> {
             providerKey: 'xosovnm',
             name: 'XosoVNM.net Public API',
             adapterType: 'xosovnm',
-            baseUrl: process.env.XOSOVNM_BASE_URL || 'https://api.xosovnm.net/api',
+            baseUrl: 'https://api.xosovnm.net/api',
             priority: 1,
             isEnabled: true,
             envSecretName: process.env.XOSOVNM_API_KEY
@@ -104,7 +105,14 @@ export async function ensureDatabaseSeeded(): Promise<void> {
             lastStatus: 'READY',
           },
         ])
-        .onConflictDoNothing();
+        .onConflictDoUpdate({
+          target: apiProviders.providerKey,
+          set: {
+            adapterType: 'xosovnm',
+            baseUrl: 'https://api.xosovnm.net/api',
+            updatedAt: new Date(),
+          },
+        });
 
       const [{ value: seoCount }] = await db
         .select({ value: count() })
@@ -403,8 +411,7 @@ export async function synchronizeVietlottFromXosoVNM(): Promise<number> {
       .where(eq(apiProviders.providerKey, 'xosovnm'))
       .limit(1);
 
-    const baseUrl =
-      xosovnmProv?.baseUrl || process.env.XOSOVNM_BASE_URL || 'https://api.xosovnm.net/api';
+    const baseUrl = 'https://api.xosovnm.net/api';
     const auth = xosovnmProv ? resolveBackendApiAuth(xosovnmProv) : undefined;
     const data = await fetchXosoVNMVietlott(baseUrl, xosovnmProv?.timeoutMs || 8000, auth);
     let synced = 0;
@@ -656,7 +663,7 @@ export async function synchronizeRegionResults(
     const providers = await db
       .select()
       .from(apiProviders)
-      .where(eq(apiProviders.isEnabled, true))
+      .where(and(eq(apiProviders.providerKey, 'xosovnm'), eq(apiProviders.isEnabled, true)))
       .orderBy(apiProviders.priority);
 
     if (providers.length === 0) {

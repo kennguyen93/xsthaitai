@@ -1,28 +1,25 @@
-import { count, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db } from './index.ts';
 import { users } from './schema.ts';
 
+export const ALLOWED_ADMIN_EMAIL = 'kennguyen931908@gmail.com';
+
+export function isAllowedAdminEmail(email?: string | null): boolean {
+  return (email || '').trim().toLowerCase() === ALLOWED_ADMIN_EMAIL;
+}
+
 export async function getOrCreateUser(uid: string, email: string, displayName = '') {
   try {
+    const role = isAllowedAdminEmail(email) ? 'admin' : 'user';
     const existing = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
     if (existing.length > 0) {
       const updated = await db
         .update(users)
-        .set({ email, displayName: displayName || existing[0].displayName })
+        .set({ email, displayName: displayName || existing[0].displayName, role })
         .where(eq(users.uid, uid))
         .returning();
       return updated[0];
     }
-
-    // Check if any admin exists yet or if email is in ADMIN_EMAILS
-    const adminEmails = (process.env.ADMIN_EMAILS || '')
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-
-    const [{ value: userCount }] = await db.select({ value: count() }).from(users);
-    const shouldBeAdmin =
-      Number(userCount) === 0 || adminEmails.includes(email.toLowerCase());
 
     const inserted = await db
       .insert(users)
@@ -30,11 +27,11 @@ export async function getOrCreateUser(uid: string, email: string, displayName = 
         uid,
         email,
         displayName,
-        role: shouldBeAdmin ? 'admin' : 'user',
+        role,
       })
       .onConflictDoUpdate({
         target: users.uid,
-        set: { email, displayName },
+        set: { email, displayName, role },
       })
       .returning();
 

@@ -9,6 +9,8 @@ import {
 } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
 
+export const ALLOWED_ADMIN_EMAIL = 'kennguyen931908@gmail.com';
+
 export interface AppUserProfile {
   id: number;
   uid: string;
@@ -20,6 +22,7 @@ export interface AppUserProfile {
 interface AuthContextValue {
   firebaseUser: User | null;
   profile: AppUserProfile | null;
+  isAdmin: boolean;
   loading: boolean;
   authError: string | null;
   popupBlocked: boolean;
@@ -159,11 +162,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setProfile(null);
   };
 
+  const isAdmin = Boolean(
+    firebaseUser?.email &&
+      firebaseUser.email.trim().toLowerCase() === ALLOWED_ADMIN_EMAIL &&
+      (!profile || profile.role === 'admin')
+  );
+
   return (
     <AuthContext.Provider
       value={{
         firebaseUser,
         profile,
+        isAdmin,
         loading,
         authError,
         popupBlocked,

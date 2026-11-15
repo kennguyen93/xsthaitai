@@ -9,7 +9,6 @@ import {
   Lock,
   LogIn,
   LogOut,
-  Plus,
   RefreshCw,
   Save,
   ShieldAlert,
@@ -161,20 +160,6 @@ export const AdminDashboard: React.FC = () => {
   const [syncDate, setSyncDate] = useState<string>(getTodayISOClient());
   const [syncForce, setSyncForce] = useState<boolean>(false);
   const [autoRefreshSync, setAutoRefreshSync] = useState<boolean>(true);
-  const [showAddProvider, setShowAddProvider] = useState<boolean>(false);
-  const [newProvider, setNewProvider] = useState({
-    providerKey: '',
-    name: '',
-    adapterType: 'generic-json',
-    baseUrl: '',
-    customEndpointPath: '/results',
-    envSecretName: 'LOTTERY_SECONDARY_API_KEY',
-    authHeader: 'x-api-key',
-    rateLimitPerMin: 30,
-    priority: 2,
-    timeoutMs: 8000,
-    maxRetries: 3,
-  });
 
   // Manual result form state
   const [editDate, setEditDate] = useState<string>(getTodayISOClient());
@@ -325,7 +310,7 @@ export const AdminDashboard: React.FC = () => {
         </div>
         <p className="text-sm text-slate-600">
           Bạn đang đăng nhập với tài khoản <span className="font-semibold">{firebaseUser.email}</span>.
-          Liên hệ quản trị viên hệ thống để được cấp quyền trong bảng users hoặc biến môi trường ADMIN_EMAILS.
+          Khu vực Quản trị chỉ dành riêng cho tài khoản <span className="font-semibold">kennguyen931908@gmail.com</span>.
         </p>
         <button
           type="button"
@@ -355,41 +340,6 @@ export const AdminDashboard: React.FC = () => {
       await loadAllAdminData();
     } catch (err: unknown) {
       setStatusMsg(err instanceof Error ? err.message : 'Đồng bộ thất bại.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleCreateProvider = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newProvider.providerKey.trim() || !newProvider.name.trim() || !newProvider.baseUrl.trim()) {
-      setStatusMsg('Vui lòng nhập đầy đủ mã, tên và Base URL của nhà cung cấp API.');
-      return;
-    }
-    setBusy(true);
-    try {
-      await authedFetch('/api/admin/providers', {
-        method: 'POST',
-        body: JSON.stringify(newProvider),
-      });
-      setStatusMsg(`Đã thêm nhà cung cấp API "${newProvider.name}".`);
-      setShowAddProvider(false);
-      setNewProvider({
-        providerKey: '',
-        name: '',
-        adapterType: 'generic-json',
-        baseUrl: '',
-        customEndpointPath: '/results',
-        envSecretName: 'LOTTERY_SECONDARY_API_KEY',
-        authHeader: 'x-api-key',
-        rateLimitPerMin: 30,
-        priority: 2,
-        timeoutMs: 8000,
-        maxRetries: 3,
-      });
-      await loadAllAdminData();
-    } catch (err: unknown) {
-      setStatusMsg(err instanceof Error ? err.message : 'Không thể thêm nhà cung cấp API.');
     } finally {
       setBusy(false);
     }
@@ -1115,104 +1065,16 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </section>
 
-          {/* Multi-Provider & Backend API Key Configuration */}
+          {/* Single Official API Source: https://api.xosovnm.net/api */}
           <section className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-slate-900">
-                Cấu Hình Nhà Cung Cấp API &amp; Giới Hạn Tốc Độ (Rate Limit)
+                Nguồn API Chính Thức Duy Nhất: https://api.xosovnm.net/api
               </h3>
-              <button
-                type="button"
-                onClick={() => setShowAddProvider((v) => !v)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Thêm nguồn API
-              </button>
+              <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-700 rounded">
+                Chỉ lấy từ api.xosovnm.net
+              </span>
             </div>
-
-            {showAddProvider && (
-              <form
-                onSubmit={handleCreateProvider}
-                className="p-4 border border-slate-200 rounded-lg bg-slate-50 grid grid-cols-1 sm:grid-cols-3 gap-3"
-              >
-                <input
-                  type="text"
-                  value={newProvider.providerKey}
-                  onChange={(e) => setNewProvider({ ...newProvider, providerKey: e.target.value })}
-                  placeholder="Mã nguồn (vd: backup_api)"
-                  className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white font-lottery"
-                />
-                <input
-                  type="text"
-                  value={newProvider.name}
-                  onChange={(e) => setNewProvider({ ...newProvider, name: e.target.value })}
-                  placeholder="Tên hiển thị"
-                  className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white"
-                />
-                <select
-                  value={newProvider.adapterType}
-                  onChange={(e) => setNewProvider({ ...newProvider, adapterType: e.target.value })}
-                  className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white"
-                >
-                  <option value="generic-json">Adapter: Generic JSON</option>
-                  <option value="xosovnm">Adapter: XosoVNM.net</option>
-                </select>
-                <input
-                  type="text"
-                  value={newProvider.baseUrl}
-                  onChange={(e) => setNewProvider({ ...newProvider, baseUrl: e.target.value })}
-                  placeholder="Base URL (https://...)"
-                  className="sm:col-span-2 px-3 py-1.5 text-xs border border-slate-300 rounded bg-white font-lottery"
-                />
-                <input
-                  type="text"
-                  value={newProvider.customEndpointPath}
-                  onChange={(e) =>
-                    setNewProvider({ ...newProvider, customEndpointPath: e.target.value })
-                  }
-                  placeholder="Endpoint path (/results)"
-                  className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white font-lottery"
-                />
-                <input
-                  type="text"
-                  value={newProvider.envSecretName}
-                  onChange={(e) =>
-                    setNewProvider({ ...newProvider, envSecretName: e.target.value })
-                  }
-                  placeholder="Tên biến ENV chứa API Key"
-                  className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white font-lottery"
-                />
-                <select
-                  value={newProvider.authHeader}
-                  onChange={(e) => setNewProvider({ ...newProvider, authHeader: e.target.value })}
-                  className="px-3 py-1.5 text-xs border border-slate-300 rounded bg-white"
-                >
-                  <option value="none">Không dùng Auth Header</option>
-                  <option value="x-api-key">Header: x-api-key</option>
-                  <option value="authorization-bearer">Header: Authorization Bearer</option>
-                  <option value="query-param">Query: ?api_key=...</option>
-                </select>
-                <div className="flex gap-2">
-                  <input
-                    type="number"
-                    value={newProvider.rateLimitPerMin}
-                    onChange={(e) =>
-                      setNewProvider({ ...newProvider, rateLimitPerMin: Number(e.target.value) })
-                    }
-                    placeholder="Req/phút"
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded bg-white font-lottery"
-                  />
-                  <button
-                    type="submit"
-                    disabled={busy}
-                    className="px-4 py-1.5 text-xs font-semibold text-white bg-[#C8102E] hover:bg-[#A60D26] rounded shrink-0 cursor-pointer"
-                  >
-                    Thêm
-                  </button>
-                </div>
-              </form>
-            )}
 
             <div className="space-y-4">
               {overview.providers.map((p, idx) => {
@@ -1264,14 +1126,10 @@ export const AdminDashboard: React.FC = () => {
                     <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5">
                       <input
                         type="text"
-                        value={p.baseUrl}
-                        onChange={(e) => {
-                          const updated = [...overview.providers];
-                          updated[idx] = { ...p, baseUrl: e.target.value };
-                          setOverview({ ...overview, providers: updated });
-                        }}
-                        className="sm:col-span-2 px-3 py-1.5 text-xs border border-slate-300 rounded font-lottery"
-                        placeholder="Base URL"
+                        value="https://api.xosovnm.net/api"
+                        readOnly
+                        className="sm:col-span-2 px-3 py-1.5 text-xs border border-slate-200 bg-slate-50 text-slate-600 rounded font-lottery"
+                        title="Nguồn API cố định"
                       />
                       <input
                         type="text"

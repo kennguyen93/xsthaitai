@@ -415,7 +415,11 @@ app.get('/api/admin/overview', requireAdmin, async (_req, res) => {
     const [coverage, autoSync, providers] = await Promise.all([
       getDatabaseCoverageStats(),
       getAutoSyncDashboardState(),
-      db.select().from(apiProviders).orderBy(apiProviders.priority),
+      db
+        .select()
+        .from(apiProviders)
+        .where(eq(apiProviders.providerKey, 'xosovnm'))
+        .orderBy(apiProviders.priority),
     ]);
 
     const safeProviders = providers.map((p) => ({
@@ -572,7 +576,11 @@ app.delete('/api/admin/results/:id', requireAdmin, async (req, res) => {
 
 app.get('/api/admin/providers', requireAdmin, async (_req, res) => {
   try {
-    const providers = await db.select().from(apiProviders).orderBy(apiProviders.priority);
+    const providers = await db
+      .select()
+      .from(apiProviders)
+      .where(eq(apiProviders.providerKey, 'xosovnm'))
+      .orderBy(apiProviders.priority);
     res.json(
       providers.map((p) => ({
         ...p,
@@ -585,51 +593,10 @@ app.get('/api/admin/providers', requireAdmin, async (_req, res) => {
   }
 });
 
-app.post('/api/admin/providers', requireAdmin, async (req, res) => {
-  try {
-    const {
-      providerKey,
-      name,
-      adapterType,
-      baseUrl,
-      envSecretName,
-      authHeader,
-      customEndpointPath,
-      rateLimitPerMin,
-      priority,
-      timeoutMs,
-      maxRetries,
-      isEnabled,
-    } = req.body;
-
-    if (!providerKey || !name || !baseUrl) {
-      return res.status(400).json({ error: 'Thiếu mã, tên hoặc Base URL nhà cung cấp API.' });
-    }
-
-    const inserted = await db
-      .insert(apiProviders)
-      .values({
-        providerKey: String(providerKey).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_'),
-        name: String(name).trim(),
-        adapterType: adapterType === 'xosovnm' ? 'xosovnm' : 'generic-json',
-        baseUrl: String(baseUrl).trim(),
-        envSecretName: String(envSecretName || 'PUBLIC_NO_KEY_REQUIRED').trim(),
-        authHeader: String(authHeader || 'none').trim(),
-        customEndpointPath: String(customEndpointPath || '/results').trim(),
-        rateLimitPerMin: Math.max(1, Number(rateLimitPerMin || 30)),
-        priority: Math.max(1, Number(priority || 2)),
-        timeoutMs: Math.max(1000, Number(timeoutMs || 8000)),
-        maxRetries: Math.max(1, Math.min(5, Number(maxRetries || 3))),
-        isEnabled: isEnabled !== false,
-        lastStatus: 'READY',
-      })
-      .returning();
-
-    res.json({ ok: true, provider: inserted[0] });
-  } catch (error) {
-    console.error('POST /api/admin/providers failed:', error);
-    res.status(500).json({ error: 'Không thể thêm nhà cung cấp API mới.' });
-  }
+app.post('/api/admin/providers', requireAdmin, async (_req, res) => {
+  return res.status(400).json({
+    error: 'Hệ thống chỉ sử dụng nguồn API duy nhất https://api.xosovnm.net/api.',
+  });
 });
 
 app.put('/api/admin/providers/:id', requireAdmin, async (req, res) => {
@@ -637,8 +604,6 @@ app.put('/api/admin/providers/:id', requireAdmin, async (req, res) => {
     const id = Number(req.params.id);
     const {
       name,
-      adapterType,
-      baseUrl,
       envSecretName,
       authHeader,
       customEndpointPath,
@@ -652,19 +617,19 @@ app.put('/api/admin/providers/:id', requireAdmin, async (req, res) => {
       .update(apiProviders)
       .set({
         ...(name ? { name } : {}),
-        ...(adapterType ? { adapterType } : {}),
-        baseUrl,
+        adapterType: 'xosovnm',
+        baseUrl: 'https://api.xosovnm.net/api',
         ...(envSecretName ? { envSecretName } : {}),
         ...(authHeader ? { authHeader } : {}),
-        customEndpointPath,
+        ...(customEndpointPath ? { customEndpointPath } : {}),
         ...(rateLimitPerMin !== undefined ? { rateLimitPerMin: Math.max(1, Number(rateLimitPerMin)) } : {}),
-        priority: Number(priority),
+        priority: Number(priority || 1),
         isEnabled: Boolean(isEnabled),
-        timeoutMs: Number(timeoutMs),
-        maxRetries: Number(maxRetries),
+        timeoutMs: Number(timeoutMs || 8000),
+        maxRetries: Number(maxRetries || 3),
         updatedAt: new Date(),
       })
-      .where(eq(apiProviders.id, id))
+      .where(and(eq(apiProviders.id, id), eq(apiProviders.providerKey, 'xosovnm')))
       .returning();
 
     res.json({ ok: true, provider: updated[0] });

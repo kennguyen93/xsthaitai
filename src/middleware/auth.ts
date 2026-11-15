@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin.ts';
-import { getOrCreateUser } from '../db/users.ts';
+import { getOrCreateUser, isAllowedAdminEmail } from '../db/users.ts';
 
 export interface AuthRequest extends Request {
   user?: DecodedIdToken;
@@ -47,9 +47,13 @@ export const requireAdmin = async (
   next: NextFunction
 ) => {
   await requireAuth(req, res, async () => {
-    if (!req.dbUser || req.dbUser.role !== 'admin') {
+    if (
+      !req.dbUser ||
+      req.dbUser.role !== 'admin' ||
+      !isAllowedAdminEmail(req.dbUser.email)
+    ) {
       return res.status(403).json({
-        error: 'Bạn không có quyền quản trị (Admin) để thực hiện thao tác này.',
+        error: 'Chỉ tài khoản quản trị kennguyen931908@gmail.com mới có quyền truy cập.',
       });
     }
     next();
