@@ -213,27 +213,69 @@ export function mapVietlottRows(rows: DbVietlottRow[]): {
   return { mega, power, max3d };
 }
 
-export async function fetchResultsByDate(date: string) {
-  const res = await fetch(`/api/results?date=${encodeURIComponent(date)}`);
-  if (!res.ok) throw new Error('Không thể tải kết quả xổ số từ máy chủ.');
+async function fetchWithRetry(
+  url: string,
+  errorMessage: string,
+  signal?: AbortSignal,
+  maxRetries = 2
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, { signal });
+      if (res.ok) return res;
+      // Only retry transient 5xx responses
+      if (res.status < 500 || attempt === maxRetries) {
+        let serverError = errorMessage;
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body?.error) serverError = body.error;
+        } catch {
+          // Ignore non-JSON error body
+        }
+        throw new Error(serverError);
+      }
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw err;
+      }
+      lastErr = err;
+      if (attempt === maxRetries) {
+        throw err instanceof Error ? err : new Error(errorMessage);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(errorMessage);
+}
+
+export async function fetchResultsByDate(date: string, signal?: AbortSignal) {
+  const res = await fetchWithRetry(
+    `/api/results?date=${encodeURIComponent(date)}`,
+    'Không thể tải kết quả xổ số từ máy chủ.',
+    signal
+  );
   return (await res.json()) as { date: string; count: number; results: DbLotteryRow[] };
 }
 
 export async function fetchProvinces(): Promise<DbProvinceRow[]> {
-  const res = await fetch('/api/provinces');
-  if (!res.ok) throw new Error('Không thể tải danh sách tỉnh.');
+  const res = await fetchWithRetry('/api/provinces', 'Không thể tải danh sách tỉnh.');
   return (await res.json()) as DbProvinceRow[];
 }
 
 export async function fetchProvinceHistory(slug: string, limit = 10) {
-  const res = await fetch(`/api/results/province/${encodeURIComponent(slug)}?limit=${limit}`);
-  if (!res.ok) throw new Error('Không thể tải lịch sử kết quả tỉnh.');
+  const res = await fetchWithRetry(
+    `/api/results/province/${encodeURIComponent(slug)}?limit=${limit}`,
+    'Không thể tải lịch sử kết quả tỉnh.'
+  );
   return (await res.json()) as { province: DbProvinceRow; draws: DbLotteryRow[] };
 }
 
 export async function fetchVietlottByDate(date: string) {
-  const res = await fetch(`/api/vietlott?date=${encodeURIComponent(date)}`);
-  if (!res.ok) throw new Error('Không thể tải kết quả Vietlott.');
+  const res = await fetchWithRetry(
+    `/api/vietlott?date=${encodeURIComponent(date)}`,
+    'Không thể tải kết quả Vietlott.'
+  );
   return (await res.json()) as { date: string; results: DbVietlottRow[] };
 }
 
@@ -249,8 +291,10 @@ export async function fetchStatistics(
     days: String(days),
   });
   if (provinceCode) params.set('provinceCode', provinceCode);
-  const res = await fetch(`/api/statistics?${params.toString()}`);
-  if (!res.ok) throw new Error('Không thể tải dữ liệu thống kê.');
+  const res = await fetchWithRetry(
+    `/api/statistics?${params.toString()}`,
+    'Không thể tải dữ liệu thống kê.'
+  );
   return (await res.json()) as ServerStatisticsData;
 }
 

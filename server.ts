@@ -127,17 +127,26 @@ app.get('/api/results', async (req, res) => {
           ? [region as 'MB' | 'MN' | 'MT']
           : ['MB', 'MN', 'MT'];
 
-      await Promise.all(
+      const syncAll = Promise.all(
         targetRegions.map((reg) =>
           synchronizeRegionResults(reg, date, { syncMode: 'ON_DEMAND' }).catch(() => null)
         )
-      );
+      ).then(() => cacheService.invalidatePrefix(`xoso365:results:${date}`));
 
-      rows = await db
-        .select()
-        .from(lotteryResults)
-        .where(and(...conditions))
-        .orderBy(lotteryResults.region, lotteryResults.id);
+      if (rows.length === 0) {
+        await Promise.race([
+          syncAll,
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+
+        rows = await db
+          .select()
+          .from(lotteryResults)
+          .where(and(...conditions))
+          .orderBy(lotteryResults.region, lotteryResults.id);
+      } else {
+        void syncAll;
+      }
     }
 
     // Never fabricate today's or future results when API has no data yet; only backfill historical dates strictly before today
@@ -221,8 +230,16 @@ app.get('/api/vietlott', async (req, res) => {
     const hasLiveXosoVNM = rows.length === 3 && rows.every((r) => r.source === 'XosoVNM.net');
 
     if (date <= today && date >= thirtyDaysAgo && !hasLiveXosoVNM) {
-      await synchronizeVietlottFromXosoVNM();
-      rows = await getLatestVietlottFromDB(date);
+      const syncV = synchronizeVietlottFromXosoVNM().catch(() => 0);
+      if (rows.length === 0) {
+        await Promise.race([
+          syncV,
+          new Promise((resolve) => setTimeout(resolve, 4500)),
+        ]);
+        rows = await getLatestVietlottFromDB(date);
+      } else {
+        void syncV;
+      }
     }
 
     if (rows.length === 0 && date < today && date >= '2016-01-01') {

@@ -29,7 +29,7 @@ import {
   generateRegionalPageJsonLd,
   generateUtilityPageJsonLd,
 } from './utils/jsonLdGenerator';
-import { formatDateISO, formatDateVN, getDayNameVN } from './utils/lotteryEngine';
+import { formatDateISO, formatDateVN, getDayNameVN, shiftDateISO } from './utils/lotteryEngine';
 import { applyDynamicSeoHead } from './utils/seoHead';
 
 const ORDERED_WEEKDAYS = [1, 2, 3, 4, 5, 6, 0];
@@ -110,8 +110,24 @@ function LoadingSpinner() {
   );
 }
 
+function getTodayVNISOClient(): string {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const formatted = fmt.format(new Date());
+    if (/^\d{4}-\d{2}-\d{2}$/.test(formatted)) return formatted;
+  } catch {
+    // Fallback to local clock
+  }
+  return formatDateISO(new Date());
+}
+
 export function App() {
-  const todayISO = useMemo(() => formatDateISO(new Date()), []);
+  const todayISO = useMemo(() => getTodayVNISOClient(), []);
   const initialRoute = useMemo(() => parsePathToState(window.location.pathname), []);
 
   const [selectedDate, setSelectedDate] = useState<string>(todayISO);
@@ -209,16 +225,29 @@ export function App() {
   }, [activeTab, provinceSlug, seoList, selectedDate, dbRows]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
     setLoadingResults(true);
     setResultsError(null);
-    fetchResultsByDate(selectedDate)
-      .then((res) => setDbRows(res.results))
-      .catch((err: unknown) =>
+    fetchResultsByDate(selectedDate, controller.signal)
+      .then((res) => {
+        if (!active) return;
+        setDbRows(res.results);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
         setResultsError(
-          err instanceof Error ? err.message : 'Không thể tải dữ liệu từ PostgreSQL.'
-        )
-      )
-      .finally(() => setLoadingResults(false));
+          err instanceof Error ? err.message : 'Không thể tải dữ liệu từ máy chủ.'
+        );
+      })
+      .finally(() => {
+        if (active) setLoadingResults(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [selectedDate, reloadKey]);
 
   const xsmbResult = useMemo(() => {
@@ -323,6 +352,25 @@ export function App() {
 
             {!showResultsSkeleton && !resultsError && activeTab === 'home' && (
               <>
+                {!xsmbResult && xsmnResults.length === 0 && xsmtResults.length === 0 && (
+                  <div className="bg-white border border-slate-200 rounded-lg p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="text-sm text-slate-600">
+                      Chưa có kết quả mở thưởng cho ngày{' '}
+                      <span className="font-semibold text-slate-900">
+                        {formatDateVN(selectedDate)}
+                      </span>
+                      . Hệ thống sẽ tự động cập nhật ngay khi có giải mới từ đài quay.
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDate(shiftDateISO(selectedDate, -1))}
+                      className="px-3 py-1.5 text-xs font-semibold text-[#C8102E] bg-red-50 hover:bg-red-100 rounded-md whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Xem ngày hôm qua
+                    </button>
+                  </div>
+                )}
+
                 {xsmbResult && (
                   <LotteryTableXSMB
                     result={xsmbResult}
