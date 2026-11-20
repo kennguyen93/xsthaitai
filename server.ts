@@ -34,8 +34,17 @@ import {
   getDatabaseCoverageStats,
   getLatestVietlottFromDB,
   synchronizeRegionResults,
-  synchronizeVietlottFromXosoVNM,
 } from './server/services/lotterySyncService.ts';
+import {
+  hasActiveProviderKey,
+  PHAVN_API_BASE,
+} from './server/services/externalProviderClient.ts';
+import {
+  activateAdminKeySlot,
+  getAdminKeySlots,
+  resetExpiredKeySlot,
+  saveAdminKeySlots,
+} from './server/services/apiKeyPoolService.ts';
 import { computePostgreSQLStatistics } from './server/services/statisticsService.ts';
 import { runScheduledSyncTick, startSyncScheduler } from './server/jobs/syncScheduler.ts';
 import {
@@ -49,6 +58,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, service: 'xosothantai1.com', cache: cacheService.getStats() });
+});
+
 // Ensure initial reference & recent archive data exists on first API hit
 app.use('/api', async (_req, _res, next) => {
   try {
@@ -57,10 +70,6 @@ app.use('/api', async (_req, _res, next) => {
     console.error('Seed check error:', err);
   }
   next();
-});
-
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'xosothantai1.com', cache: cacheService.getStats() });
 });
 
 // ================= PUBLIC LOTTERY ROUTES =================
@@ -227,20 +236,6 @@ app.get('/api/vietlott', async (req, res) => {
     const thirtyDaysAgo = shiftDateStr(today, -30);
 
     let rows = await getLatestVietlottFromDB(date);
-    const hasLiveXosoVNM = rows.length === 3 && rows.every((r) => r.source === 'XosoVNM.net');
-
-    if (date <= today && date >= thirtyDaysAgo && !hasLiveXosoVNM) {
-      const syncV = synchronizeVietlottFromXosoVNM().catch(() => 0);
-      if (rows.length === 0) {
-        await Promise.race([
-          syncV,
-          new Promise((resolve) => setTimeout(resolve, 4500)),
-        ]);
-        rows = await getLatestVietlottFromDB(date);
-      } else {
-        void syncV;
-      }
-    }
 
     if (rows.length === 0 && date < today && date >= '2016-01-01') {
       const built = buildVietlottForDate(date, 'OnDemandArchive');
@@ -412,27 +407,29 @@ app.get('/api/cron/status', async (req, res, next) => {
 
 app.get('/api/admin/overview', requireAdmin, async (_req, res) => {
   try {
-    const [coverage, autoSync, providers] = await Promise.all([
+    const [coverage, autoSync, providers, keySlots] = await Promise.all([
       getDatabaseCoverageStats(),
       getAutoSyncDashboardState(),
       db
         .select()
         .from(apiProviders)
-        .where(eq(apiProviders.providerKey, 'xosovnm'))
+        .where(eq(apiProviders.providerKey, 'phavn'))
         .orderBy(apiProviders.priority),
+      getAdminKeySlots('phavn'),
     ]);
 
-    const safeProviders = providers.map((p) => ({
-      ...p,
-      hasEnvKey: Boolean(
-        process.env[p.envSecretName] && process.env[p.envSecretName]!.trim().length > 0
-      ),
-    }));
+    const safeProviders = await Promise.all(
+      providers.map(async (p) => ({
+        ...p,
+        hasEnvKey: await hasActiveProviderKey(p.providerKey),
+      }))
+    );
 
     res.json({
       coverage,
       cache: cacheService.getStats(),
       providers: safeProviders,
+      keySlots,
       recentLogs: autoSync.recentLogs,
       autoSync,
     });
@@ -579,14 +576,15 @@ app.get('/api/admin/providers', requireAdmin, async (_req, res) => {
     const providers = await db
       .select()
       .from(apiProviders)
-      .where(eq(apiProviders.providerKey, 'xosovnm'))
+      .where(eq(apiProviders.providerKey, 'phavn'))
       .orderBy(apiProviders.priority);
-    res.json(
-      providers.map((p) => ({
+    const result = await Promise.all(
+      providers.map(async (p) => ({
         ...p,
-        hasEnvKey: Boolean(process.env[p.envSecretName] && process.env[p.envSecretName]!.trim().length > 0),
+        hasEnvKey: await hasActiveProviderKey(p.providerKey),
       }))
     );
+    res.json(result);
   } catch (error) {
     console.error('GET /api/admin/providers failed:', error);
     res.status(500).json({ error: 'Không thể tải cấu hình API.' });
@@ -595,7 +593,7 @@ app.get('/api/admin/providers', requireAdmin, async (_req, res) => {
 
 app.post('/api/admin/providers', requireAdmin, async (_req, res) => {
   return res.status(400).json({
-    error: 'Hệ thống chỉ sử dụng nguồn API duy nhất https://api.xosovnm.net/api.',
+    error: 'Hệ thống chỉ sử dụng nguồn API duy nhất https://pha.vn/api/v1/traditional.',
   });
 });
 
@@ -604,7 +602,6 @@ app.put('/api/admin/providers/:id', requireAdmin, async (req, res) => {
     const id = Number(req.params.id);
     const {
       name,
-      envSecretName,
       authHeader,
       customEndpointPath,
       rateLimitPerMin,
@@ -617,9 +614,9 @@ app.put('/api/admin/providers/:id', requireAdmin, async (req, res) => {
       .update(apiProviders)
       .set({
         ...(name ? { name } : {}),
-        adapterType: 'xosovnm',
-        baseUrl: 'https://api.xosovnm.net/api',
-        ...(envSecretName ? { envSecretName } : {}),
+        adapterType: 'phavn',
+        baseUrl: PHAVN_API_BASE,
+        envSecretName: 'PHA_API_KEY',
         ...(authHeader ? { authHeader } : {}),
         ...(customEndpointPath ? { customEndpointPath } : {}),
         ...(rateLimitPerMin !== undefined ? { rateLimitPerMin: Math.max(1, Number(rateLimitPerMin)) } : {}),
@@ -629,13 +626,74 @@ app.put('/api/admin/providers/:id', requireAdmin, async (req, res) => {
         maxRetries: Number(maxRetries || 3),
         updatedAt: new Date(),
       })
-      .where(and(eq(apiProviders.id, id), eq(apiProviders.providerKey, 'xosovnm')))
+      .where(and(eq(apiProviders.id, id), eq(apiProviders.providerKey, 'phavn')))
       .returning();
 
     res.json({ ok: true, provider: updated[0] });
   } catch (error) {
     console.error('PUT /api/admin/providers/:id failed:', error);
     res.status(500).json({ error: 'Không thể cập nhật cấu hình API.' });
+  }
+});
+
+app.get('/api/admin/provider-keys', requireAdmin, async (_req, res) => {
+  try {
+    const slots = await getAdminKeySlots('phavn');
+    res.json({ slots });
+  } catch (error) {
+    console.error('GET /api/admin/provider-keys failed:', error);
+    res.status(500).json({ error: 'Không thể tải danh sách 10 mục API Key.' });
+  }
+});
+
+app.put('/api/admin/provider-keys', requireAdmin, async (req, res) => {
+  try {
+    const incoming = req.body?.slots;
+    if (!Array.isArray(incoming)) {
+      return res.status(400).json({ error: 'Dữ liệu danh sách API Key không hợp lệ.' });
+    }
+    const sanitized = incoming.map((item: { slotIndex?: unknown; apiKey?: unknown; label?: unknown }) => ({
+      slotIndex: Number(item?.slotIndex),
+      apiKey: typeof item?.apiKey === 'string' ? item.apiKey : '',
+      label: typeof item?.label === 'string' ? item.label : undefined,
+    }));
+    const slots = await saveAdminKeySlots('phavn', sanitized);
+    res.json({ ok: true, slots });
+  } catch (error) {
+    console.error('PUT /api/admin/provider-keys failed:', error);
+    res.status(500).json({ error: 'Không thể lưu danh sách 10 mục API Key.' });
+  }
+});
+
+app.post('/api/admin/provider-keys/:slotIndex/activate', requireAdmin, async (req, res) => {
+  try {
+    const slotIndex = Number(req.params.slotIndex);
+    if (!Number.isInteger(slotIndex) || slotIndex < 1 || slotIndex > 10) {
+      return res.status(400).json({ error: 'Số thứ tự Key phải từ 1 đến 10.' });
+    }
+    const slots = await activateAdminKeySlot('phavn', slotIndex);
+    res.json({ ok: true, slots });
+  } catch (error: unknown) {
+    console.error('POST /api/admin/provider-keys/:slotIndex/activate failed:', error);
+    res.status(400).json({
+      error: error instanceof Error ? error.message : 'Không thể kích hoạt Key này.',
+    });
+  }
+});
+
+app.post('/api/admin/provider-keys/:slotIndex/reset', requireAdmin, async (req, res) => {
+  try {
+    const slotIndex = Number(req.params.slotIndex);
+    if (!Number.isInteger(slotIndex) || slotIndex < 1 || slotIndex > 10) {
+      return res.status(400).json({ error: 'Số thứ tự Key phải từ 1 đến 10.' });
+    }
+    const slots = await resetExpiredKeySlot('phavn', slotIndex);
+    res.json({ ok: true, slots });
+  } catch (error: unknown) {
+    console.error('POST /api/admin/provider-keys/:slotIndex/reset failed:', error);
+    res.status(400).json({
+      error: error instanceof Error ? error.message : 'Không thể khôi phục Key này.',
+    });
   }
 });
 

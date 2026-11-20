@@ -33,9 +33,15 @@ import {
 import {
   fetchRegionDrawsFromProvider,
   getRateLimiterSnapshot,
-  resolveBackendApiAuth,
+  PHAVN_API_BASE,
 } from './externalProviderClient.ts';
-import { ExternalApiError, fetchXosoVNMVietlott, vnDateToISO } from './xosovnmClient.ts';
+import {
+  ensureKeySlotsSeeded,
+  getAdminKeySlots,
+  isKeyExpiredHttpStatus,
+  maskApiKey,
+} from './apiKeyPoolService.ts';
+import { ExternalApiError } from './phavnClient.ts';
 
 export type SyncMode = 'AUTO_SCHEDULER' | 'CLOUD_SCHEDULER' | 'MANUAL' | 'ON_DEMAND';
 
@@ -82,24 +88,33 @@ export async function ensureDatabaseSeeded(): Promise<void> {
         await db.insert(lotteryProvinces).values(provs).onConflictDoNothing();
       }
 
-      // Enforce https://api.xosovnm.net/api as the sole external API provider
-      await db.delete(apiProviders).where(ne(apiProviders.providerKey, 'xosovnm'));
+      // Migrate any raw xs_ key accidentally saved into api_providers.env_secret_name into slot #1
+      const [existingPhavn] = await db
+        .select({ envSecretName: apiProviders.envSecretName })
+        .from(apiProviders)
+        .where(eq(apiProviders.providerKey, 'phavn'))
+        .limit(1);
+      const migratedKey =
+        existingPhavn?.envSecretName && existingPhavn.envSecretName.trim().startsWith('xs_')
+          ? existingPhavn.envSecretName.trim()
+          : undefined;
+
+      // Enforce https://pha.vn/api/v1/traditional as the sole external API provider
+      await db.delete(apiProviders).where(ne(apiProviders.providerKey, 'phavn'));
       await db
         .insert(apiProviders)
         .values([
           {
-            providerKey: 'xosovnm',
-            name: 'XosoVNM.net Public API',
-            adapterType: 'xosovnm',
-            baseUrl: 'https://api.xosovnm.net/api',
+            providerKey: 'phavn',
+            name: 'APIHub pha.vn (/api/v1/traditional)',
+            adapterType: 'phavn',
+            baseUrl: PHAVN_API_BASE,
             priority: 1,
             isEnabled: true,
-            envSecretName: process.env.XOSOVNM_API_KEY
-              ? 'XOSOVNM_API_KEY'
-              : 'PUBLIC_NO_KEY_REQUIRED',
-            authHeader: process.env.XOSOVNM_API_KEY ? 'x-api-key' : 'none',
-            customEndpointPath: '/lottery/region',
-            rateLimitPerMin: 30,
+            envSecretName: 'PHA_API_KEY',
+            authHeader: 'x-api-key',
+            customEndpointPath: '/traditional',
+            rateLimitPerMin: 100,
             timeoutMs: 8000,
             maxRetries: 3,
             lastStatus: 'READY',
@@ -108,11 +123,17 @@ export async function ensureDatabaseSeeded(): Promise<void> {
         .onConflictDoUpdate({
           target: apiProviders.providerKey,
           set: {
-            adapterType: 'xosovnm',
-            baseUrl: 'https://api.xosovnm.net/api',
+            name: 'APIHub pha.vn (/api/v1/traditional)',
+            adapterType: 'phavn',
+            baseUrl: PHAVN_API_BASE,
+            envSecretName: 'PHA_API_KEY',
+            authHeader: 'x-api-key',
+            customEndpointPath: '/traditional',
             updatedAt: new Date(),
           },
         });
+
+      await ensureKeySlotsSeeded('phavn', migratedKey);
 
       const [{ value: seoCount }] = await db
         .select({ value: count() })
@@ -403,170 +424,10 @@ async function releaseRegionLock(region: 'MB' | 'MN' | 'MT', targetDate: string)
   }
 }
 
-export async function synchronizeVietlottFromXosoVNM(): Promise<number> {
-  try {
-    const [xosovnmProv] = await db
-      .select()
-      .from(apiProviders)
-      .where(eq(apiProviders.providerKey, 'xosovnm'))
-      .limit(1);
-
-    const baseUrl = 'https://api.xosovnm.net/api';
-    const auth = xosovnmProv ? resolveBackendApiAuth(xosovnmProv) : undefined;
-    const data = await fetchXosoVNMVietlott(baseUrl, xosovnmProv?.timeoutMs || 8000, auth);
-    let synced = 0;
-
-    for (const item of data.mega) {
-      const drawDate = vnDateToISO(item.date);
-      const nums = (item.data.numbers || []).map(Number).filter((n) => !Number.isNaN(n));
-      if (nums.length === 6) {
-        await db
-          .insert(vietlottResults)
-          .values({
-            gameType: 'MEGA_645',
-            period: item.date,
-            drawDate,
-            numbers: nums,
-            bonusNumber: null,
-            jackpot1Value: item.data.jackpot || '',
-            jackpot2Value: '',
-            prizeBreakdown: {
-              winnersJackpot: item.data.prizes?.[0]?.count || 0,
-              winnersFirst: item.data.prizes?.[1]?.count || 0,
-              winnersSecond: item.data.prizes?.[2]?.count || 0,
-              winnersThird: item.data.prizes?.[3]?.count || 0,
-            },
-            source: 'XosoVNM.net',
-          })
-          .onConflictDoUpdate({
-            target: [vietlottResults.gameType, vietlottResults.drawDate],
-            set: {
-              numbers: nums,
-              jackpot1Value: item.data.jackpot || '',
-              prizeBreakdown: {
-                winnersJackpot: item.data.prizes?.[0]?.count || 0,
-                winnersFirst: item.data.prizes?.[1]?.count || 0,
-                winnersSecond: item.data.prizes?.[2]?.count || 0,
-                winnersThird: item.data.prizes?.[3]?.count || 0,
-              },
-              source: 'XosoVNM.net',
-            },
-          });
-        synced++;
-      }
-    }
-
-    for (const item of data.power) {
-      const drawDate = vnDateToISO(item.date);
-      const allNums = (item.data.numbers || []).map(Number).filter((n) => !Number.isNaN(n));
-      if (allNums.length >= 6) {
-        const mainNums = allNums.slice(0, 6);
-        const bonus = allNums.length >= 7 ? allNums[6] : null;
-        await db
-          .insert(vietlottResults)
-          .values({
-            gameType: 'POWER_655',
-            period: item.date,
-            drawDate,
-            numbers: mainNums,
-            bonusNumber: bonus,
-            jackpot1Value: item.data.jackpot || '',
-            jackpot2Value: item.data.jackpot2 || '',
-            prizeBreakdown: {
-              winnersJp1: item.data.prizes?.[0]?.count || 0,
-              winnersJp2: item.data.prizes?.[1]?.count || 0,
-            },
-            source: 'XosoVNM.net',
-          })
-          .onConflictDoUpdate({
-            target: [vietlottResults.gameType, vietlottResults.drawDate],
-            set: {
-              numbers: mainNums,
-              bonusNumber: bonus,
-              jackpot1Value: item.data.jackpot || '',
-              jackpot2Value: item.data.jackpot2 || '',
-              prizeBreakdown: {
-                winnersJp1: item.data.prizes?.[0]?.count || 0,
-                winnersJp2: item.data.prizes?.[1]?.count || 0,
-              },
-              source: 'XosoVNM.net',
-            },
-          });
-        synced++;
-      }
-    }
-
-    for (const item of data.max3d) {
-      const drawDate = vnDateToISO(item.date);
-      const nums = item.data.numbers || [];
-      if (nums.length >= 20) {
-        await db
-          .insert(vietlottResults)
-          .values({
-            gameType: 'MAX_3D',
-            period: item.date,
-            drawDate,
-            numbers: [],
-            bonusNumber: null,
-            jackpot1Value: '1.000.000.000đ',
-            jackpot2Value: '',
-            prizeBreakdown: {
-              special: nums.slice(0, 2),
-              first: nums.slice(2, 6),
-              second: nums.slice(6, 12),
-              third: nums.slice(12, 20),
-            },
-            source: 'XosoVNM.net',
-          })
-          .onConflictDoUpdate({
-            target: [vietlottResults.gameType, vietlottResults.drawDate],
-            set: {
-              prizeBreakdown: {
-                special: nums.slice(0, 2),
-                first: nums.slice(2, 6),
-                second: nums.slice(6, 12),
-                third: nums.slice(12, 20),
-              },
-              source: 'XosoVNM.net',
-            },
-          });
-        synced++;
-      }
-    }
-
-    if (synced > 0) {
-      await cacheService.invalidatePrefix('xoso365:vietlott:');
-    }
-    return synced;
-  } catch (err) {
-    console.warn('Vietlott XosoVNM sync warning:', err);
-    return 0;
-  }
-}
-
 export async function getLatestVietlottFromDB(dateISO: string) {
   const gameTypes = ['POWER_655', 'MEGA_645', 'MAX_3D'] as const;
-  const minWindow = shiftDateStr(dateISO, -7);
   const out = [];
   for (const gt of gameTypes) {
-    const liveRows = await db
-      .select()
-      .from(vietlottResults)
-      .where(
-        and(
-          eq(vietlottResults.gameType, gt),
-          eq(vietlottResults.source, 'XosoVNM.net'),
-          lte(vietlottResults.drawDate, dateISO)
-        )
-      )
-      .orderBy(desc(vietlottResults.drawDate))
-      .limit(1);
-
-    if (liveRows[0] && liveRows[0].drawDate >= minWindow) {
-      out.push(liveRows[0]);
-      continue;
-    }
-
     const rows = await db
       .select()
       .from(vietlottResults)
@@ -663,7 +524,7 @@ export async function synchronizeRegionResults(
     const providers = await db
       .select()
       .from(apiProviders)
-      .where(and(eq(apiProviders.providerKey, 'xosovnm'), eq(apiProviders.isEnabled, true)))
+      .where(and(eq(apiProviders.providerKey, 'phavn'), eq(apiProviders.isEnabled, true)))
       .orderBy(apiProviders.priority);
 
     if (providers.length === 0) {
@@ -744,7 +605,7 @@ export async function synchronizeRegionResults(
           let skippedDuplicates = 0;
           let totalPrizesFound = 0;
           let totalPrizesExpected = 0;
-          const sourceLabel = provider.providerKey === 'xosovnm' ? 'XosoVNM.net' : provider.name;
+          const sourceLabel = provider.providerKey === 'phavn' ? 'pha.vn' : provider.name;
           const verifyingProvinces: {
             provinceCode: string;
             payloadHash: string;
@@ -961,9 +822,7 @@ export async function synchronizeRegionResults(
             }
           }
 
-          if (provider.providerKey === 'xosovnm') {
-            await synchronizeVietlottFromXosoVNM();
-          }
+          // Traditional 3-region draw sync finished
 
           // Recalculate live completion status for this region + date
           const refreshedRows = await db
@@ -1084,8 +943,8 @@ export async function synchronizeRegionResults(
             errorMessage: lastErrMsg,
           });
 
-          if (httpStatus === 429) {
-            break; // Do not retry immediately if rate-limited
+          if (httpStatus === 429 || isKeyExpiredHttpStatus(httpStatus)) {
+            break; // Do not retry immediately if rate-limited or all keys exhausted (401/403)
           }
 
           if (attempt < maxRetries) {
@@ -1159,6 +1018,9 @@ export async function getAutoSyncDashboardState() {
     .orderBy(desc(syncLogs.createdAt))
     .limit(40);
 
+  const keySlots = await getAdminKeySlots('phavn');
+  const activeSlot = keySlots.find((s) => s.status === 'ACTIVE');
+
   return {
     vnTime: vnNow,
     timezone: 'Asia/Ho_Chi_Minh',
@@ -1171,6 +1033,16 @@ export async function getAutoSyncDashboardState() {
         process.env.CRON_SYNC_SECRET && process.env.CRON_SYNC_SECRET.trim().length > 0
       ),
       activeInMemoryLocks: Array.from(inFlightSyncLocks),
+    },
+    activeKeySlotSummary: {
+      slotIndex: activeSlot?.slotIndex ?? null,
+      label: activeSlot?.label ?? null,
+      maskedKey: activeSlot ? maskApiKey(activeSlot.apiKey) : '',
+      requestsCount: activeSlot?.requestsCount ?? 0,
+      activeCount: keySlots.filter((s) => s.status === 'ACTIVE').length,
+      standbyCount: keySlots.filter((s) => s.status === 'STANDBY').length,
+      expiredCount: keySlots.filter((s) => s.status === 'EXPIRED').length,
+      emptyCount: keySlots.filter((s) => s.status === 'EMPTY').length,
     },
     windows: REGION_DRAW_WINDOWS,
     sessions,

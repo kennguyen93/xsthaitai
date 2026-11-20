@@ -6,11 +6,18 @@ import {
 } from './lotteryDataHelper.ts';
 import {
   ExternalApiError,
-  fetchJsonWithTimeout,
-  fetchXosoVNMCity,
-  fetchXosoVNMMienBac,
+  fetchPhaVNCity,
+  fetchPhaVNMienBac,
   type ApiAuthOptions,
-} from './xosovnmClient.ts';
+} from './phavnClient.ts';
+import {
+  getActiveProviderKeySlot,
+  isKeyExpiredHttpStatus,
+  recordKeyUsage,
+  rotateExpiredProviderKey,
+  TOTAL_KEY_SLOTS,
+  type ProviderApiKeySlot,
+} from './apiKeyPoolService.ts';
 
 export interface ExternalApiDraw {
   provinceCode: string;
@@ -37,7 +44,10 @@ export interface ProviderFetchResult {
   httpStatus: number | null;
   endpointUrl: string;
   requestsMade: number;
+  keySlotUsed?: number;
 }
+
+export const PHAVN_API_BASE = 'https://pha.vn/api/v1';
 
 // In-memory sliding window rate limiter per providerKey
 const providerRequestTimestamps = new Map<string, number[]>();
@@ -46,7 +56,7 @@ export function checkAndConsumeRateLimit(
   providerKey: string,
   rateLimitPerMin: number
 ): { allowed: boolean; currentCount: number; limit: number; retryAfterSec: number } {
-  const limit = Math.max(1, rateLimitPerMin || 30);
+  const limit = Math.max(1, rateLimitPerMin || 100);
   const now = Date.now();
   const windowStart = now - 60_000;
   const list = (providerRequestTimestamps.get(providerKey) || []).filter(
@@ -80,33 +90,25 @@ export function getRateLimiterSnapshot(): Record<
   return out;
 }
 
-export function resolveBackendApiAuth(provider: ProviderConfigInput): ApiAuthOptions {
-  if (!provider.envSecretName || provider.envSecretName === 'PUBLIC_NO_KEY_REQUIRED') {
-    return { authHeader: 'none' };
-  }
-  const secretValue = process.env[provider.envSecretName];
-  if (!secretValue || !secretValue.trim()) {
-    return { authHeader: 'none' };
-  }
-  return {
-    apiKey: secretValue.trim(),
-    authHeader: provider.authHeader || 'x-api-key',
-  };
+export async function hasActiveProviderKey(providerKey = 'phavn'): Promise<boolean> {
+  const slot = await getActiveProviderKeySlot(providerKey);
+  return Boolean(slot && slot.apiKey.trim().length > 0);
 }
 
-export const XOSOVNM_API_BASE = 'https://api.xosovnm.net/api';
-
-export async function fetchRegionDrawsFromProvider(
+async function executeRegionFetchWithSingleSlot(
   provider: ProviderConfigInput,
   region: 'MB' | 'MN' | 'MT',
   targetDate: string,
+  slot: ProviderApiKeySlot,
   provinceCodesFilter?: string[]
 ): Promise<ProviderFetchResult> {
-  const auth = resolveBackendApiAuth(provider);
+  const auth: ApiAuthOptions = {
+    apiKey: slot.apiKey.trim(),
+    authHeader: provider.authHeader === 'none' ? 'x-api-key' : provider.authHeader || 'x-api-key',
+  };
   const dow = getDayOfWeekUTC(targetDate);
-  const baseUrl = XOSOVNM_API_BASE;
+  const baseUrl = PHAVN_API_BASE;
 
-  // Strictly use https://api.xosovnm.net/api
   if (region === 'MB') {
     const rate = checkAndConsumeRateLimit(provider.providerKey, provider.rateLimitPerMin);
     if (!rate.allowed) {
@@ -116,42 +118,47 @@ export async function fetchRegionDrawsFromProvider(
         baseUrl
       );
     }
-    const { item, httpStatus, endpointUrl } = await fetchXosoVNMMienBac(
+    const { item, httpStatus, endpointUrl } = await fetchPhaVNMienBac(
       baseUrl,
       targetDate,
       provider.timeoutMs,
       auth
     );
-    if (!item) {
-      return { draws: [], httpStatus, endpointUrl, requestsMade: 1 };
+    await recordKeyUsage(slot.id, 1).catch(() => {});
+
+    if (!item || !item.prizes) {
+      return {
+        draws: [],
+        httpStatus,
+        endpointUrl,
+        requestsMade: 1,
+        keySlotUsed: slot.slotIndex,
+      };
     }
     const schedProv = XSMB_SCHEDULE_MAP[dow];
-    const kyHieu =
-      item.data.madb && item.data.madb !== 'N/A'
-        ? item.data.madb.split('-').filter(Boolean)
-        : [];
     return {
       draws: [
         {
           provinceCode: schedProv?.code || 'XSHN',
-          provinceName: item.data.city?.[0] || schedProv?.name || 'Hà Nội',
+          provinceName: schedProv?.name || 'Hà Nội',
           region: 'MB',
-          kyHieu,
+          kyHieu: [],
           prizes: {
-            db: item.data.db || [],
-            g1: item.data.g1 || [],
-            g2: item.data.g2 || [],
-            g3: item.data.g3 || [],
-            g4: item.data.g4 || [],
-            g5: item.data.g5 || [],
-            g6: item.data.g6 || [],
-            g7: item.data.g7 || [],
+            db: item.prizes.db || [],
+            g1: item.prizes.g1 || [],
+            g2: item.prizes.g2 || [],
+            g3: item.prizes.g3 || [],
+            g4: item.prizes.g4 || [],
+            g5: item.prizes.g5 || [],
+            g6: item.prizes.g6 || [],
+            g7: item.prizes.g7 || [],
           },
         },
       ],
       httpStatus,
       endpointUrl,
       requestsMade: 1,
+      keySlotUsed: slot.slotIndex,
     };
   }
 
@@ -166,8 +173,9 @@ export async function fetchRegionDrawsFromProvider(
     return {
       draws: [],
       httpStatus: 200,
-      endpointUrl: `${provider.baseUrl}/lottery/city`,
+      endpointUrl: `${baseUrl}/traditional`,
       requestsMade: 0,
+      keySlotUsed: slot.slotIndex,
     };
   }
 
@@ -178,17 +186,17 @@ export async function fetchRegionDrawsFromProvider(
         throw new ExternalApiError(
           `Vượt giới hạn tốc độ API (${rate.limit} req/phút) cho ${provider.name}, thử lại sau ${rate.retryAfterSec}s.`,
           429,
-          provider.baseUrl
+          baseUrl
         );
       }
-      const res = await fetchXosoVNMCity(
-        provider.baseUrl,
+      const res = await fetchPhaVNCity(
+        baseUrl,
         prov.code,
         targetDate,
         provider.timeoutMs,
         auth
       );
-      if (!res.item) {
+      if (!res.item || !res.item.prizes) {
         return { draw: null, httpStatus: res.httpStatus, endpointUrl: res.endpointUrl };
       }
       return {
@@ -198,15 +206,15 @@ export async function fetchRegionDrawsFromProvider(
           region,
           kyHieu: [],
           prizes: {
-            g8: res.item.data.g8 || [],
-            g7: res.item.data.g7 || [],
-            g6: res.item.data.g6 || [],
-            g5: res.item.data.g5 || [],
-            g4: res.item.data.g4 || [],
-            g3: res.item.data.g3 || [],
-            g2: res.item.data.g2 || [],
-            g1: res.item.data.g1 || [],
-            db: res.item.data.db || [],
+            g8: res.item.prizes.g8 || [],
+            g7: res.item.prizes.g7 || [],
+            g6: res.item.prizes.g6 || [],
+            g5: res.item.prizes.g5 || [],
+            g4: res.item.prizes.g4 || [],
+            g3: res.item.prizes.g3 || [],
+            g2: res.item.prizes.g2 || [],
+            g1: res.item.prizes.g1 || [],
+            db: res.item.prizes.db || [],
           },
         } as ExternalApiDraw,
         httpStatus: res.httpStatus,
@@ -215,8 +223,10 @@ export async function fetchRegionDrawsFromProvider(
     })
   );
 
+  await recordKeyUsage(slot.id, targetProvs.length).catch(() => {});
+
   const lastStatus = cityResults[cityResults.length - 1]?.httpStatus ?? 200;
-  const sampleUrl = cityResults[0]?.endpointUrl ?? provider.baseUrl;
+  const sampleUrl = cityResults[0]?.endpointUrl ?? `${baseUrl}/traditional`;
   const draws = cityResults
     .map((r) => r.draw)
     .filter((d): d is ExternalApiDraw => d !== null);
@@ -226,5 +236,66 @@ export async function fetchRegionDrawsFromProvider(
     httpStatus: lastStatus,
     endpointUrl: sampleUrl,
     requestsMade: targetProvs.length,
+    keySlotUsed: slot.slotIndex,
   };
+}
+
+export async function fetchRegionDrawsFromProvider(
+  provider: ProviderConfigInput,
+  region: 'MB' | 'MN' | 'MT',
+  targetDate: string,
+  provinceCodesFilter?: string[]
+): Promise<ProviderFetchResult> {
+  const baseUrl = PHAVN_API_BASE;
+  let activeSlot = await getActiveProviderKeySlot(provider.providerKey);
+
+  if (!activeSlot) {
+    throw new ExternalApiError(
+      'Không có API Key khả dụng (tất cả 10 mục Key đang trống hoặc đã hết hạn). Vui lòng nhập Key mới trong trang Quản trị.',
+      401,
+      baseUrl
+    );
+  }
+
+  // Strictly sequential: always use ONLY the single ACTIVE key; switch to next STANDBY key only if current key expires (401/403)
+  for (let hop = 0; hop < TOTAL_KEY_SLOTS; hop++) {
+    try {
+      return await executeRegionFetchWithSingleSlot(
+        provider,
+        region,
+        targetDate,
+        activeSlot,
+        provinceCodesFilter
+      );
+    } catch (err: unknown) {
+      if (err instanceof ExternalApiError && isKeyExpiredHttpStatus(err.httpStatus)) {
+        const rotation = await rotateExpiredProviderKey(
+          provider.providerKey,
+          activeSlot.slotIndex,
+          err.message
+        );
+        if (rotation.newSlot) {
+          if (!rotation.alreadyRotatedBySibling) {
+            console.warn(
+              `[KeyPool] Key #${activeSlot.slotIndex} hết hạn (${err.httpStatus}), tự động chuyển sang Key #${rotation.newSlot.slotIndex}.`
+            );
+          }
+          activeSlot = rotation.newSlot;
+          continue;
+        }
+        throw new ExternalApiError(
+          `Key #${activeSlot.slotIndex} đã hết hạn (${err.message}) và không còn Key dự phòng nào trong 10 mục Key.`,
+          err.httpStatus,
+          baseUrl
+        );
+      }
+      throw err;
+    }
+  }
+
+  throw new ExternalApiError(
+    'Đã thử toàn bộ các mục API Key dự phòng nhưng đều đã hết hạn.',
+    401,
+    baseUrl
+  );
 }

@@ -98,6 +98,29 @@ export const apiProviders = pgTable('api_providers', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const providerApiKeys = pgTable(
+  'provider_api_keys',
+  {
+    id: serial('id').primaryKey(),
+    providerKey: text('provider_key').notNull().default('phavn'),
+    slotIndex: integer('slot_index').notNull(), // 1..10
+    label: text('label').notNull(),
+    apiKey: text('api_key').default('').notNull(),
+    status: text('status').notNull().default('EMPTY'), // 'ACTIVE' | 'STANDBY' | 'EXPIRED' | 'EMPTY'
+    requestsCount: integer('requests_count').notNull().default(0),
+    lastUsedAt: timestamp('last_used_at'),
+    expiredAt: timestamp('expired_at'),
+    lastError: text('last_error').default('').notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('provider_api_keys_provider_slot_idx').on(
+      table.providerKey,
+      table.slotIndex
+    ),
+  ]
+);
+
 export const syncSessions = pgTable(
   'sync_sessions',
   {

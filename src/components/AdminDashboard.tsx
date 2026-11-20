@@ -6,10 +6,14 @@ import {
   Database,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
+  KeyRound,
   Lock,
   LogIn,
   LogOut,
   RefreshCw,
+  RotateCcw,
   Save,
   ShieldAlert,
   Trash2,
@@ -69,6 +73,16 @@ interface AutoSyncState {
     updatedAt: string;
   }[];
   rateLimiter: Record<string, { requestsInLastMinute: number }>;
+  activeKeySlotSummary?: {
+    slotIndex: number | null;
+    label: string | null;
+    maskedKey: string;
+    requestsCount: number;
+    activeCount: number;
+    standbyCount: number;
+    expiredCount: number;
+    emptyCount: number;
+  };
   recentLogs: {
     id: number;
     providerKey: string;
@@ -86,6 +100,26 @@ interface AutoSyncState {
     errorMessage: string;
     createdAt: string;
   }[];
+}
+
+interface KeySlotRow {
+  id: number;
+  providerKey: string;
+  slotIndex: number;
+  label: string;
+  apiKey: string;
+  status: 'ACTIVE' | 'STANDBY' | 'EXPIRED' | 'EMPTY' | string;
+  requestsCount: number;
+  lastUsedAt: string | null;
+  expiredAt: string | null;
+  lastError: string;
+  updatedAt: string;
+}
+
+interface KeySlotEdit {
+  slotIndex: number;
+  label: string;
+  apiKey: string;
 }
 
 interface AdminOverview {
@@ -119,6 +153,7 @@ interface AdminOverview {
     lastStatus: string | null;
     hasEnvKey: boolean;
   }[];
+  keySlots?: KeySlotRow[];
   recentLogs: AutoSyncState['recentLogs'];
   autoSync?: AutoSyncState;
 }
@@ -142,7 +177,6 @@ export const AdminDashboard: React.FC = () => {
     inIframe,
     getToken,
     loginWithGoogle,
-    loginWithRedirect,
     logout,
   } = useAuth();
 
@@ -174,6 +208,16 @@ export const AdminDashboard: React.FC = () => {
   const [adTarget, setAdTarget] = useState('/thong-ke');
   const [adAlt, setAdAlt] = useState('');
 
+  // 10 API Key replacement slots state
+  const [keySlotEdits, setKeySlotEdits] = useState<KeySlotEdit[]>(() =>
+    Array.from({ length: 10 }, (_, i) => ({
+      slotIndex: i + 1,
+      label: `Key #${i + 1}`,
+      apiKey: '',
+    }))
+  );
+  const [revealedSlots, setRevealedSlots] = useState<Record<number, boolean>>({});
+
   const authedFetch = useCallback(
     async (url: string, init?: RequestInit) => {
       const token = await getToken();
@@ -204,6 +248,19 @@ export const AdminDashboard: React.FC = () => {
         authedFetch('/api/admin/backups'),
       ]);
       setOverview(ov);
+      if (Array.isArray(ov.keySlots)) {
+        setKeySlotEdits(
+          Array.from({ length: 10 }, (_, i) => {
+            const idx = i + 1;
+            const found = (ov.keySlots as KeySlotRow[]).find((s) => s.slotIndex === idx);
+            return {
+              slotIndex: idx,
+              label: found?.label || `Key #${idx}`,
+              apiKey: found?.apiKey || '',
+            };
+          })
+        );
+      }
       setResultsList(resData.results || []);
       setSeoList(seoData.seo || []);
       setAdsList(adData.ads || []);
@@ -254,7 +311,7 @@ export const AdminDashboard: React.FC = () => {
       <section className="bg-white border border-slate-200 rounded-lg p-6 sm:p-8 max-w-xl mx-auto text-center space-y-4">
         <h2 className="text-xl font-bold text-slate-900">Đăng Nhập Quản Trị xosothantai1.com</h2>
         <p className="text-sm text-slate-600">
-          Khu vực quản lý kết quả xổ số, đồng bộ xosovnm.net, cấu hình SEO, quảng cáo và sao lưu dữ liệu lịch sử 10 năm.
+          Khu vực quản lý kết quả xổ số, đồng bộ pha.vn, cấu hình SEO, quảng cáo và sao lưu dữ liệu lịch sử 10 năm.
         </p>
         {authError && (
           <div className="p-3 text-xs text-left text-red-700 bg-red-50 border border-red-200 rounded space-y-1.5">
@@ -286,15 +343,6 @@ export const AdminDashboard: React.FC = () => {
               <ExternalLink className="w-4 h-4" />
               Mở ở tab mới
             </a>
-          )}
-          {!inIframe && popupBlocked && (
-            <button
-              type="button"
-              onClick={loginWithRedirect}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md cursor-pointer"
-            >
-              Đăng nhập chuyển hướng
-            </button>
           )}
         </div>
       </section>
@@ -463,6 +511,87 @@ export const AdminDashboard: React.FC = () => {
       await loadAllAdminData();
     } catch (err: unknown) {
       setStatusMsg(err instanceof Error ? err.message : 'Cập nhật thất bại.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applySlotsResponse = (slots: KeySlotRow[]) => {
+    setOverview((prev) =>
+      prev
+        ? {
+            ...prev,
+            keySlots: slots,
+            providers: prev.providers.map((prov) => ({
+              ...prov,
+              hasEnvKey: slots.some((s) => s.status === 'ACTIVE' && s.apiKey.trim().length > 0),
+            })),
+          }
+        : prev
+    );
+    setKeySlotEdits(
+      Array.from({ length: 10 }, (_, i) => {
+        const idx = i + 1;
+        const found = slots.find((s) => s.slotIndex === idx);
+        return {
+          slotIndex: idx,
+          label: found?.label || `Key #${idx}`,
+          apiKey: found?.apiKey || '',
+        };
+      })
+    );
+  };
+
+  const handleSaveKeySlots = async () => {
+    setBusy(true);
+    setStatusMsg(null);
+    try {
+      const res = await authedFetch('/api/admin/provider-keys', {
+        method: 'PUT',
+        body: JSON.stringify({ slots: keySlotEdits }),
+      });
+      if (Array.isArray(res.slots)) {
+        applySlotsResponse(res.slots);
+      }
+      setStatusMsg('Đã lưu danh sách 10 mục API Key dự phòng thành công.');
+    } catch (err: unknown) {
+      setStatusMsg(err instanceof Error ? err.message : 'Lưu danh sách API Key thất bại.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleActivateKeySlot = async (slotIndex: number) => {
+    setBusy(true);
+    setStatusMsg(null);
+    try {
+      const res = await authedFetch(`/api/admin/provider-keys/${slotIndex}/activate`, {
+        method: 'POST',
+      });
+      if (Array.isArray(res.slots)) {
+        applySlotsResponse(res.slots);
+      }
+      setStatusMsg(`Đã chuyển Key #${slotIndex} sang trạng thái ĐANG DÙNG (duy nhất).`);
+    } catch (err: unknown) {
+      setStatusMsg(err instanceof Error ? err.message : 'Không thể kích hoạt Key này.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResetKeySlot = async (slotIndex: number) => {
+    setBusy(true);
+    setStatusMsg(null);
+    try {
+      const res = await authedFetch(`/api/admin/provider-keys/${slotIndex}/reset`, {
+        method: 'POST',
+      });
+      if (Array.isArray(res.slots)) {
+        applySlotsResponse(res.slots);
+      }
+      setStatusMsg(`Đã khôi phục Key #${slotIndex} về trạng thái DỰ PHÒNG.`);
+    } catch (err: unknown) {
+      setStatusMsg(err instanceof Error ? err.message : 'Không thể khôi phục Key này.');
     } finally {
       setBusy(false);
     }
@@ -1065,14 +1194,14 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </section>
 
-          {/* Single Official API Source: https://api.xosovnm.net/api */}
-          <section className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+          {/* Single Official API Source: https://pha.vn/api/v1/traditional */}
+          <section className="bg-white border border-slate-200 rounded-lg p-5 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-slate-900">
-                Nguồn API Chính Thức Duy Nhất: https://api.xosovnm.net/api
+                Nguồn API Chính Thức Duy Nhất: https://pha.vn/api/v1/traditional
               </h3>
               <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-700 rounded">
-                Chỉ lấy từ api.xosovnm.net
+                Chỉ lấy từ pha.vn
               </span>
             </div>
 
@@ -1080,6 +1209,7 @@ export const AdminDashboard: React.FC = () => {
               {overview.providers.map((p, idx) => {
                 const usedPerMin =
                   overview.autoSync?.rateLimiter?.[p.providerKey]?.requestsInLastMinute ?? 0;
+                const activeKeyInfo = (overview.keySlots || []).find((s) => s.status === 'ACTIVE');
                 return (
                   <div key={p.id} className="p-4 border border-slate-200 rounded-lg space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1091,17 +1221,18 @@ export const AdminDashboard: React.FC = () => {
                           </span>
                         </div>
                         <div className="text-xs text-slate-500">
-                          {p.envSecretName === 'PUBLIC_NO_KEY_REQUIRED' ? (
-                            <span>API Công Khai · Không yêu cầu API key</span>
+                          Biến ENV mặc định:{' '}
+                          <span className="font-lottery font-semibold">PHA_API_KEY</span> ({p.authHeader}) ·{' '}
+                          {activeKeyInfo ? (
+                            <span className="text-emerald-700 font-semibold">
+                              Đang dùng Key #{activeKeyInfo.slotIndex}
+                            </span>
+                          ) : p.hasEnvKey ? (
+                            'Đã cấu hình API Key trên máy chủ'
                           ) : (
-                            <>
-                              Biến ENV Secret:{' '}
-                              <span className="font-lottery font-semibold">{p.envSecretName}</span>{' '}
-                              ({p.authHeader}) ·{' '}
-                              {p.hasEnvKey
-                                ? 'Đã cấu hình API Key trên máy chủ'
-                                : 'Chưa gắn API Key trong ENV'}
-                            </>
+                            <span className="text-red-600 font-semibold">
+                              Chưa có Key khả dụng
+                            </span>
                           )}{' '}
                           · Tải hiện tại:{' '}
                           <span className="font-lottery font-semibold">
@@ -1126,22 +1257,17 @@ export const AdminDashboard: React.FC = () => {
                     <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5">
                       <input
                         type="text"
-                        value="https://api.xosovnm.net/api"
+                        value="https://pha.vn/api/v1/traditional"
                         readOnly
                         className="sm:col-span-2 px-3 py-1.5 text-xs border border-slate-200 bg-slate-50 text-slate-600 rounded font-lottery"
                         title="Nguồn API cố định"
                       />
                       <input
                         type="text"
-                        value={p.envSecretName}
-                        onChange={(e) => {
-                          const updated = [...overview.providers];
-                          updated[idx] = { ...p, envSecretName: e.target.value };
-                          setOverview({ ...overview, providers: updated });
-                        }}
-                        className="px-3 py-1.5 text-xs border border-slate-300 rounded font-lottery"
-                        placeholder="ENV Secret Name"
-                        title="Tên biến môi trường trên server chứa API Key"
+                        value="PHA_API_KEY"
+                        readOnly
+                        className="px-3 py-1.5 text-xs border border-slate-200 bg-slate-50 text-slate-600 rounded font-lottery"
+                        title="Tên biến môi trường dự phòng; các Key thực tế được quản lý ở 10 mục bên dưới"
                       />
                       <input
                         type="number"
@@ -1169,8 +1295,9 @@ export const AdminDashboard: React.FC = () => {
                       />
                       <button
                         type="button"
+                        disabled={busy}
                         onClick={() => handleUpdateProvider(overview.providers[idx])}
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded cursor-pointer"
+                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded cursor-pointer"
                       >
                         <Save className="w-3.5 h-3.5" />
                         Lưu
@@ -1179,6 +1306,221 @@ export const AdminDashboard: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+
+            {/* 10 Replacement API Key Slots (Strictly Single Active Key Rotation) */}
+            <div className="pt-2 border-t border-slate-200 space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-[#C8102E]" />
+                    <h4 className="text-sm font-bold text-slate-900">
+                      Danh Sách 10 Mục API Key Thay Thế (Xoay Vòng Tuần Tự)
+                    </h4>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-1">
+                    Hệ thống chỉ gọi <span className="font-semibold text-slate-900">duy nhất 1 Key đang ở trạng thái ĐANG DÙNG</span>. Chỉ khi Key hiện tại hết hạn hoặc bị vô hiệu hóa (HTTP 401/403), hệ thống mới tự động chuyển sang Key DỰ PHÒNG kế tiếp — <span className="font-semibold text-[#C8102E]">không bao giờ gọi đồng loạt các Key</span>.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleSaveKeySlots}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C8102E] hover:bg-[#A60D26] disabled:opacity-50 rounded-md shrink-0 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  Lưu 10 Mục API Key
+                </button>
+              </div>
+
+              {/* Status summary strip */}
+              {overview.keySlots && (
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="px-2.5 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                    Đang dùng: {overview.keySlots.filter((s) => s.status === 'ACTIVE').length}/1
+                  </span>
+                  <span className="px-2.5 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">
+                    Dự phòng: {overview.keySlots.filter((s) => s.status === 'STANDBY').length}
+                  </span>
+                  <span className="px-2.5 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">
+                    Hết hạn: {overview.keySlots.filter((s) => s.status === 'EXPIRED').length}
+                  </span>
+                  <span className="px-2.5 py-1 rounded bg-slate-100 text-slate-600 border border-slate-200 font-semibold">
+                    Trống: {overview.keySlots.filter((s) => s.status === 'EMPTY').length}
+                  </span>
+                </div>
+              )}
+
+              <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-700">
+                      <th className="py-2 px-3 text-left w-16">Mục</th>
+                      <th className="py-2 px-3 text-left w-36">Tên gợi nhớ</th>
+                      <th className="py-2 px-3 text-left">Giá trị X-API-KEY</th>
+                      <th className="py-2 px-3 text-center w-28">Trạng thái</th>
+                      <th className="py-2 px-3 text-right w-28">Đã gọi</th>
+                      <th className="py-2 px-3 text-right w-44">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {keySlotEdits.map((edit, idx) => {
+                      const serverSlot = (overview.keySlots || []).find(
+                        (s) => s.slotIndex === edit.slotIndex
+                      );
+                      const status = serverSlot?.status || (edit.apiKey.trim() ? 'STANDBY' : 'EMPTY');
+                      const isRevealed = Boolean(revealedSlots[edit.slotIndex]);
+                      const hasSavedKey = Boolean(serverSlot?.apiKey?.trim());
+
+                      return (
+                        <tr
+                          key={edit.slotIndex}
+                          className={
+                            status === 'ACTIVE'
+                              ? 'bg-emerald-50/40'
+                              : status === 'EXPIRED'
+                              ? 'bg-red-50/30'
+                              : ''
+                          }
+                        >
+                          <td className="py-2 px-3 font-lottery font-bold text-slate-800 whitespace-nowrap">
+                            #{edit.slotIndex}
+                          </td>
+                          <td className="py-2 px-3">
+                            <input
+                              type="text"
+                              value={edit.label}
+                              onChange={(e) => {
+                                const next = [...keySlotEdits];
+                                next[idx] = { ...edit, label: e.target.value };
+                                setKeySlotEdits(next);
+                              }}
+                              placeholder={`Key #${edit.slotIndex}`}
+                              className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded bg-white"
+                            />
+                          </td>
+                          <td className="py-2 px-3">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type={isRevealed ? 'text' : 'password'}
+                                  value={edit.apiKey}
+                                  onChange={(e) => {
+                                    const next = [...keySlotEdits];
+                                    next[idx] = { ...edit, apiKey: e.target.value };
+                                    setKeySlotEdits(next);
+                                  }}
+                                  placeholder={`Nhập X-API-KEY dự phòng #${edit.slotIndex} (VD: xs_...)`}
+                                  autoComplete="off"
+                                  className="w-full min-w-[220px] px-2.5 py-1.5 text-xs border border-slate-300 rounded font-lottery bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setRevealedSlots((prev) => ({
+                                      ...prev,
+                                      [edit.slotIndex]: !prev[edit.slotIndex],
+                                    }))
+                                  }
+                                  className="p-1.5 text-slate-500 hover:text-slate-800 border border-slate-200 rounded bg-white cursor-pointer"
+                                  title={isRevealed ? 'Ẩn Key' : 'Hiện Key'}
+                                >
+                                  {isRevealed ? (
+                                    <EyeOff className="w-3.5 h-3.5" />
+                                  ) : (
+                                    <Eye className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                              {serverSlot?.lastError && (
+                                <div className="text-[11px] text-red-600 truncate max-w-md" title={serverSlot.lastError}>
+                                  {serverSlot.lastError}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 text-center whitespace-nowrap">
+                            {status === 'ACTIVE' && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                <CheckCircle2 className="w-3 h-3" />
+                                ĐANG DÙNG
+                              </span>
+                            )}
+                            {status === 'STANDBY' && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                                DỰ PHÒNG
+                              </span>
+                            )}
+                            {status === 'EXPIRED' && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded font-semibold bg-red-100 text-red-700 border border-red-200">
+                                HẾT HẠN
+                              </span>
+                            )}
+                            {status === 'EMPTY' && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded font-semibold bg-slate-100 text-slate-500 border border-slate-200">
+                                TRỐNG
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-right font-lottery whitespace-nowrap">
+                            <div className="font-semibold text-slate-800">
+                              {(serverSlot?.requestsCount ?? 0).toLocaleString('vi-VN')} req
+                            </div>
+                            {serverSlot?.lastUsedAt && (
+                              <div className="text-[11px] text-slate-400">
+                                {new Date(serverSlot.lastUsedAt).toLocaleTimeString('vi-VN')}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              {hasSavedKey && status !== 'ACTIVE' && status !== 'EXPIRED' && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleActivateKeySlot(edit.slotIndex)}
+                                  className="px-2 py-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded disabled:opacity-50 cursor-pointer"
+                                  title="Chuyển Key này thành Key duy nhất đang dùng"
+                                >
+                                  Đặt làm chính
+                                </button>
+                              )}
+                              {status === 'EXPIRED' && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleResetKeySlot(edit.slotIndex)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded disabled:opacity-50 cursor-pointer"
+                                  title="Đưa Key hết hạn trở lại danh sách dự phòng"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  Khôi phục
+                                </button>
+                              )}
+                              {edit.apiKey.trim() !== '' && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    const next = [...keySlotEdits];
+                                    next[idx] = { ...edit, apiKey: '' };
+                                    setKeySlotEdits(next);
+                                  }}
+                                  className="p-1 text-slate-400 hover:text-red-600 rounded cursor-pointer"
+                                  title="Xóa Key ở mục này (nhấn Lưu để áp dụng)"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </section>
 

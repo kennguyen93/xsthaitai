@@ -1,9 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
-  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
-  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -29,7 +27,6 @@ interface AuthContextValue {
   inIframe: boolean;
   getToken: () => Promise<string | null>;
   loginWithGoogle: () => Promise<void>;
-  loginWithRedirect: () => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -39,7 +36,77 @@ function extractFirebaseErrorCode(err: unknown): string {
   if (err && typeof err === 'object' && 'code' in err && typeof (err as { code: unknown }).code === 'string') {
     return (err as { code: string }).code;
   }
-  return '';
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const match = msg.match(/\((auth\/[a-z0-9-]+)\)/i);
+  return match ? match[1] : '';
+}
+
+function formatFirebaseAuthError(err: unknown, inIframe: boolean): { message: string; popupBlocked: boolean } {
+  const code = extractFirebaseErrorCode(err);
+
+  if (
+    code === 'auth/popup-blocked' ||
+    code === 'auth/operation-not-supported-in-this-environment'
+  ) {
+    return {
+      popupBlocked: true,
+      message: inIframe
+        ? 'Trình duyệt đang chặn cửa sổ bật lên (Popup) trong khung xem trước. Vui lòng bấm "Mở ở tab mới" để đăng nhập bằng Google.'
+        : 'Trình duyệt đang chặn cửa sổ bật lên (Popup) để đăng nhập Google. Vui lòng bật cho phép Popup cho trang này rồi bấm Đăng nhập lại.',
+    };
+  }
+
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return {
+      popupBlocked: false,
+      message: 'Cửa sổ đăng nhập Google đã bị đóng trước khi hoàn tất.',
+    };
+  }
+
+  if (code === 'auth/unauthorized-domain') {
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    return {
+      popupBlocked: false,
+      message: `Tên miền hiện tại (${host}) chưa được cấp phép trong Firebase Authorized Domains. Vui lòng mở ứng dụng qua URL chính thức hoặc thêm "${host}" vào Firebase Console -> Authentication -> Settings -> Authorized domains.`,
+    };
+  }
+
+  if (code === 'auth/network-request-failed') {
+    return {
+      popupBlocked: false,
+      message: 'Lỗi kết nối mạng khi xác thực Google. Vui lòng kiểm tra kết nối và thử lại.',
+    };
+  }
+
+  return {
+    popupBlocked: false,
+    message: err instanceof Error ? err.message : 'Đăng nhập thất bại.',
+  };
+}
+
+async function fetchAuthProfileWithRetry(token: string): Promise<AppUserProfile | null> {
+  const delays = [600, 1200, 2000];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      const res = await fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = (await res.json()) as { user: AppUserProfile };
+        return data.user;
+      }
+      if (res.status < 500 && ct.includes('application/json')) {
+        return null;
+      }
+    } catch {
+      // Transient network error while server warms up
+    }
+    if (attempt < delays.length) {
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+  }
+  return null;
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -59,14 +126,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
 
-    // Complete pending redirect sign-in if returning from signInWithRedirect
-    getRedirectResult(auth).catch((err: unknown) => {
-      const code = extractFirebaseErrorCode(err);
-      if (code && code !== 'auth/no-current-user') {
-        setAuthError(err instanceof Error ? err.message : 'Không thể hoàn tất đăng nhập chuyển hướng.');
-      }
-    });
-
     const unsub = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (user) {
@@ -74,15 +133,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setPopupBlocked(false);
         try {
           const token = await user.getIdToken();
-          const res = await fetch('/api/auth/me', {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (res.ok) {
-            const data = (await res.json()) as { user: AppUserProfile };
-            setProfile(data.user);
-          } else {
-            setProfile(null);
-          }
+          const syncedProfile = await fetchAuthProfileWithRetry(token);
+          setProfile(syncedProfile);
         } catch {
           setProfile(null);
         }
@@ -99,61 +151,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return auth.currentUser.getIdToken();
   };
 
-  const loginWithRedirect = async () => {
-    setAuthError(null);
-    setPopupBlocked(false);
-    try {
-      await signInWithRedirect(auth, googleAuthProvider);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Đăng nhập chuyển hướng thất bại.';
-      setAuthError(msg);
-    }
-  };
-
   const loginWithGoogle = async () => {
     setAuthError(null);
     setPopupBlocked(false);
     try {
       await signInWithPopup(auth, googleAuthProvider);
     } catch (err: unknown) {
-      const code = extractFirebaseErrorCode(err);
-      if (
-        code === 'auth/popup-blocked' ||
-        code === 'auth/operation-not-supported-in-this-environment'
-      ) {
-        if (!inIframe) {
-          // Top-level web tab: seamlessly fall back to redirect sign-in
-          try {
-            await signInWithRedirect(auth, googleAuthProvider);
-            return;
-          } catch (redirErr: unknown) {
-            setAuthError(
-              redirErr instanceof Error ? redirErr.message : 'Không thể chuyển hướng đăng nhập Google.'
-            );
-            return;
-          }
-        }
-        setPopupBlocked(true);
-        setAuthError(
-          'Trình duyệt đang chặn cửa sổ bật lên (Popup) để đăng nhập Google. Vui lòng bật cho phép Popup cho trang này rồi bấm thử lại, hoặc mở trang trong tab mới để đăng nhập.'
-        );
-        return;
-      }
-
-      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-        setAuthError('Cửa sổ đăng nhập Google đã bị đóng trước khi hoàn tất.');
-        return;
-      }
-
-      if (code === 'auth/unauthorized-domain') {
-        setAuthError(
-          `Tên miền ${window.location.hostname} chưa được thêm vào Authorized Domains trong Firebase Authentication.`
-        );
-        return;
-      }
-
-      const msg = err instanceof Error ? err.message : 'Đăng nhập thất bại.';
-      setAuthError(msg);
+      const formatted = formatFirebaseAuthError(err, inIframe);
+      setPopupBlocked(formatted.popupBlocked);
+      setAuthError(formatted.message);
     }
   };
 
@@ -180,7 +186,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         inIframe,
         getToken,
         loginWithGoogle,
-        loginWithRedirect,
         logout,
       }}
     >

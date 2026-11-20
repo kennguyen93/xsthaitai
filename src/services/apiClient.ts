@@ -213,70 +213,114 @@ export function mapVietlottRows(rows: DbVietlottRow[]): {
   return { mega, power, max3d };
 }
 
-async function fetchWithRetry(
+async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function fetchJsonWithRetry<T>(
   url: string,
   errorMessage: string,
   signal?: AbortSignal,
-  maxRetries = 2
-): Promise<Response> {
+  maxRetries = 5
+): Promise<T> {
+  const retryDelays = [700, 1200, 1800, 2500, 3200];
   let lastErr: unknown;
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const res = await fetch(url, { signal });
-      if (res.ok) return res;
-      // Only retry transient 5xx responses
-      if (res.status < 500 || attempt === maxRetries) {
+      const res = await fetch(url, {
+        signal,
+        headers: { Accept: 'application/json' },
+      });
+      const contentType = res.headers.get('content-type') || '';
+      const isJson = contentType.includes('application/json');
+
+      // Nginx returns /warmup.html (200 or 502/503/504 text/html) while backend is starting
+      if (res.ok && isJson) {
+        return (await res.json()) as T;
+      }
+
+      const isTransientHtmlOr5xx = !isJson || res.status >= 500;
+      if (!isTransientHtmlOr5xx || attempt === maxRetries) {
         let serverError = errorMessage;
-        try {
-          const body = (await res.json()) as { error?: string };
-          if (body?.error) serverError = body.error;
-        } catch {
-          // Ignore non-JSON error body
+        if (isJson) {
+          try {
+            const body = (await res.json()) as { error?: string };
+            if (body?.error) serverError = body.error;
+          } catch {
+            // Ignore malformed JSON
+          }
         }
         throw new Error(serverError);
       }
+
+      lastErr = new Error(errorMessage);
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         throw err;
       }
       lastErr = err;
       if (attempt === maxRetries) {
-        throw err instanceof Error ? err : new Error(errorMessage);
+        throw new Error(
+          err instanceof Error && err.message && !err.message.includes('Failed to fetch')
+            ? err.message
+            : errorMessage
+        );
       }
     }
-    await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+
+    const baseDelay = retryDelays[Math.min(attempt, retryDelays.length - 1)];
+    const jitter = Math.floor(Math.random() * 250);
+    await sleepWithAbort(baseDelay + jitter, signal);
   }
+
   throw lastErr instanceof Error ? lastErr : new Error(errorMessage);
 }
 
 export async function fetchResultsByDate(date: string, signal?: AbortSignal) {
-  const res = await fetchWithRetry(
+  return fetchJsonWithRetry<{ date: string; count: number; results: DbLotteryRow[] }>(
     `/api/results?date=${encodeURIComponent(date)}`,
     'Không thể tải kết quả xổ số từ máy chủ.',
     signal
   );
-  return (await res.json()) as { date: string; count: number; results: DbLotteryRow[] };
 }
 
 export async function fetchProvinces(): Promise<DbProvinceRow[]> {
-  const res = await fetchWithRetry('/api/provinces', 'Không thể tải danh sách tỉnh.');
-  return (await res.json()) as DbProvinceRow[];
+  return fetchJsonWithRetry<DbProvinceRow[]>(
+    '/api/provinces',
+    'Không thể tải danh sách tỉnh.'
+  );
 }
 
 export async function fetchProvinceHistory(slug: string, limit = 10) {
-  const res = await fetchWithRetry(
+  return fetchJsonWithRetry<{ province: DbProvinceRow; draws: DbLotteryRow[] }>(
     `/api/results/province/${encodeURIComponent(slug)}?limit=${limit}`,
     'Không thể tải lịch sử kết quả tỉnh.'
   );
-  return (await res.json()) as { province: DbProvinceRow; draws: DbLotteryRow[] };
 }
 
 export async function fetchVietlottByDate(date: string) {
-  const res = await fetchWithRetry(
+  return fetchJsonWithRetry<{ date: string; results: DbVietlottRow[] }>(
     `/api/vietlott?date=${encodeURIComponent(date)}`,
     'Không thể tải kết quả Vietlott.'
   );
-  return (await res.json()) as { date: string; results: DbVietlottRow[] };
 }
 
 export async function fetchStatistics(
@@ -291,21 +335,24 @@ export async function fetchStatistics(
     days: String(days),
   });
   if (provinceCode) params.set('provinceCode', provinceCode);
-  const res = await fetchWithRetry(
+  return fetchJsonWithRetry<ServerStatisticsData>(
     `/api/statistics?${params.toString()}`,
     'Không thể tải dữ liệu thống kê.'
   );
-  return (await res.json()) as ServerStatisticsData;
 }
 
 export async function fetchSeoMetadata(): Promise<SeoRow[]> {
-  const res = await fetch('/api/seo');
-  if (!res.ok) return [];
-  return (await res.json()) as SeoRow[];
+  try {
+    return await fetchJsonWithRetry<SeoRow[]>('/api/seo', 'Không thể tải cấu hình SEO.', undefined, 2);
+  } catch {
+    return [];
+  }
 }
 
 export async function fetchActiveAds(): Promise<AdRow[]> {
-  const res = await fetch('/api/ads');
-  if (!res.ok) return [];
-  return (await res.json()) as AdRow[];
+  try {
+    return await fetchJsonWithRetry<AdRow[]>('/api/ads', 'Không thể tải quảng cáo.', undefined, 2);
+  } catch {
+    return [];
+  }
 }
