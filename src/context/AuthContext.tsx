@@ -6,7 +6,7 @@ import {
   type User,
 } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
-import { isBackendApiUnavailable, resolveApiUrl } from '../services/apiClient';
+import { ensureBackendChecked, resolveApiUrl } from '../services/apiClient';
 
 export const ALLOWED_ADMIN_EMAIL = 'kennguyen931908@gmail.com';
 
@@ -86,7 +86,7 @@ function formatFirebaseAuthError(err: unknown, inIframe: boolean): { message: st
 }
 
 async function fetchAuthProfileWithRetry(token: string): Promise<AppUserProfile | null> {
-  if (isBackendApiUnavailable()) return null;
+  if (!(await ensureBackendChecked())) return null;
   const delays = [600, 1200, 2000];
   for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {

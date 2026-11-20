@@ -17,7 +17,88 @@ const CONFIGURED_API_BASE = (import.meta.env.VITE_API_BASE_URL || '')
   .trim()
   .replace(/\/+$/, '');
 
-let backendApiUnavailable = false;
+const STATIC_HOST_SESSION_KEY = 'xoso_direct_phavn_host';
+
+function isDirectBackendHost(): boolean {
+  if (typeof window === 'undefined') return true;
+  if (CONFIGURED_API_BASE) return true;
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.run.app')
+  );
+}
+
+function isKnownStaticFrontendHost(): boolean {
+  if (typeof window === 'undefined' || CONFIGURED_API_BASE) return false;
+  const host = window.location.hostname.toLowerCase();
+  if (
+    host.endsWith('.vercel.app') ||
+    host.endsWith('.netlify.app') ||
+    host.endsWith('.pages.dev') ||
+    host.endsWith('.github.io') ||
+    host.endsWith('.web.app') ||
+    host.endsWith('.firebaseapp.com') ||
+    host.endsWith('.surge.sh') ||
+    host.endsWith('.workers.dev')
+  ) {
+    return true;
+  }
+  try {
+    return window.sessionStorage.getItem(STATIC_HOST_SESSION_KEY) === host;
+  } catch {
+    return false;
+  }
+}
+
+let backendApiUnavailable = isKnownStaticFrontendHost();
+let backendProbePromise: Promise<boolean> | null = isDirectBackendHost()
+  ? Promise.resolve(true)
+  : backendApiUnavailable
+  ? Promise.resolve(false)
+  : null;
+
+function markBackendUnavailable(): void {
+  backendApiUnavailable = true;
+  backendProbePromise = Promise.resolve(false);
+  try {
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem(STATIC_HOST_SESSION_KEY, window.location.hostname.toLowerCase());
+    }
+  } catch {
+    // Ignore storage restriction
+  }
+}
+
+export async function ensureBackendChecked(): Promise<boolean> {
+  if (backendApiUnavailable) return false;
+  if (backendProbePromise) return backendProbePromise;
+
+  backendProbePromise = (async () => {
+    try {
+      const res = await fetch(resolveApiUrl('/api/health'), {
+        headers: { Accept: 'application/json' },
+      });
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const body = (await res.json()) as { ok?: boolean };
+        if (body?.ok) return true;
+      }
+      if (res.status === 404 || res.status === 405 || !ct.includes('application/json')) {
+        markBackendUnavailable();
+        return false;
+      }
+      return true;
+    } catch {
+      markBackendUnavailable();
+      return false;
+    }
+  })();
+
+  return backendProbePromise;
+}
 
 export function resolveApiUrl(apiPath: string): string {
   if (!CONFIGURED_API_BASE) return apiPath;
@@ -267,13 +348,15 @@ async function fetchJsonWithRetry<T>(
   signal?: AbortSignal,
   maxRetries = 5
 ): Promise<T> {
-  if (backendApiUnavailable) {
+  const hasBackend = await ensureBackendChecked();
+  if (!hasBackend || backendApiUnavailable) {
     throw new ApiNotFoundError();
   }
 
   const url = resolveApiUrl(apiPath);
   const retryDelays = [700, 1200, 1800, 2500, 3200];
   let lastErr: unknown;
+  const allowJson404 = apiPath.startsWith('/api/results/province/');
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -288,16 +371,16 @@ async function fetchJsonWithRetry<T>(
         return (await res.json()) as T;
       }
 
-      // Static host / other domain without Express /api/* returns non-JSON 404/405 or SPA index.html
-      if ((res.status === 404 || res.status === 405) && !isJson) {
-        backendApiUnavailable = true;
+      // Static host / other domain without Express /api/* returns 404/405 or SPA index.html
+      if (res.status === 405 || (res.status === 404 && (!isJson || !allowJson404))) {
+        markBackendUnavailable();
         throw new ApiNotFoundError();
       }
 
       if (res.ok && !isJson) {
         const htmlSample = await res.text().catch(() => '');
         if (htmlSample.includes('id="root"') || htmlSample.includes("id='root'")) {
-          backendApiUnavailable = true;
+          markBackendUnavailable();
           throw new ApiNotFoundError();
         }
       }
