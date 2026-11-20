@@ -40,15 +40,23 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   activeTab,
   onSelectTab,
 }) => {
-  const { firebaseUser, isAdmin, loading, authError, popupBlocked, inIframe, loginWithGoogle, logout } =
-    useAuth();
+  const {
+    firebaseUser,
+    isAdmin,
+    loading,
+    authError,
+    popupBlocked,
+    inIframe,
+    loginWithGoogle,
+    logout,
+    clearAuthError,
+  } = useAuth();
   const isToday = selectedDate === todayISO;
   const minDate = '2016-01-01'; // 10-year historical lookup support
   const minYear = 2016;
   const maxYear = Number(todayISO.slice(0, 4)) || new Date().getFullYear();
 
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const [dismissAuthBanner, setDismissAuthBanner] = useState(false);
   const initialYM = parseISOYearMonth(selectedDate);
   const [viewYear, setViewYear] = useState<number>(initialYM.year);
   const [viewMonth, setViewMonth] = useState<number>(initialYM.month);
@@ -162,7 +170,6 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
             <button
               type="button"
               onClick={() => {
-                setDismissAuthBanner(false);
                 void loginWithGoogle();
               }}
               className="inline-flex items-center gap-1 px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer text-slate-700 hover:text-[#C8102E] hover:bg-red-50"
@@ -396,7 +403,7 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
         </div>
       </div>
 
-      {!firebaseUser && authError && !dismissAuthBanner && (
+      {!firebaseUser && authError && (
         <div className="bg-red-50 border-t border-red-200">
           <div className="max-w-[1240px] mx-auto px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-red-700">
             <span>{authError}</span>
@@ -414,7 +421,7 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
               )}
               <button
                 type="button"
-                onClick={() => setDismissAuthBanner(true)}
+                onClick={clearAuthError}
                 className="px-2 py-1 text-red-600 hover:text-red-900 font-medium cursor-pointer"
               >
                 Đóng

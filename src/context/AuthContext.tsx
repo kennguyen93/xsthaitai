@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -29,6 +31,7 @@ interface AuthContextValue {
   getToken: () => Promise<string | null>;
   loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
+  clearAuthError: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -53,7 +56,7 @@ function formatFirebaseAuthError(err: unknown, inIframe: boolean): { message: st
       popupBlocked: true,
       message: inIframe
         ? 'Trình duyệt đang chặn cửa sổ bật lên (Popup) trong khung xem trước. Vui lòng bấm "Mở ở tab mới" để đăng nhập bằng Google.'
-        : 'Trình duyệt đang chặn cửa sổ bật lên (Popup) để đăng nhập Google. Vui lòng bật cho phép Popup cho trang này rồi bấm Đăng nhập lại.',
+        : 'Trình duyệt đang chặn cửa sổ bật lên (Popup) để đăng nhập Google. Vui lòng bật cho phép Popup cho trang này hoặc thử lại.',
     };
   }
 
@@ -68,7 +71,7 @@ function formatFirebaseAuthError(err: unknown, inIframe: boolean): { message: st
     const host = typeof window !== 'undefined' ? window.location.hostname : '';
     return {
       popupBlocked: false,
-      message: `Tên miền hiện tại (${host}) chưa được cấp phép trong Firebase Authorized Domains. Vui lòng mở ứng dụng qua URL chính thức hoặc thêm "${host}" vào Firebase Console -> Authentication -> Settings -> Authorized domains.`,
+      message: `Tên miền hiện tại (${host}) chưa được cấp phép trong Firebase Authorized Domains. Vui lòng thêm "${host}" vào Firebase Console -> Authentication -> Settings -> Authorized domains.`,
     };
   }
 
@@ -128,6 +131,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
 
+    // Complete redirect sign-in on top-level tabs if popup was blocked and fell back to redirect
+    if (!inIframe) {
+      getRedirectResult(auth).catch((err: unknown) => {
+        const code = extractFirebaseErrorCode(err);
+        if (code) {
+          const formatted = formatFirebaseAuthError(err, false);
+          setPopupBlocked(formatted.popupBlocked);
+          setAuthError(formatted.message);
+        }
+      });
+    }
+
     const unsub = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (user) {
@@ -146,7 +161,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoading(false);
     });
     return () => unsub();
-  }, []);
+  }, [inIframe]);
 
   const getToken = async () => {
     if (!auth.currentUser) return null;
@@ -159,6 +174,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await signInWithPopup(auth, googleAuthProvider);
     } catch (err: unknown) {
+      const code = extractFirebaseErrorCode(err);
+      // On top-level browser tabs, seamlessly fall back to redirect when popups are blocked
+      if (
+        !inIframe &&
+        (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment')
+      ) {
+        try {
+          await signInWithRedirect(auth, googleAuthProvider);
+          return;
+        } catch (redirectErr: unknown) {
+          const formatted = formatFirebaseAuthError(redirectErr, inIframe);
+          setPopupBlocked(formatted.popupBlocked);
+          setAuthError(formatted.message);
+          return;
+        }
+      }
       const formatted = formatFirebaseAuthError(err, inIframe);
       setPopupBlocked(formatted.popupBlocked);
       setAuthError(formatted.message);
@@ -168,6 +199,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = async () => {
     await signOut(auth);
     setProfile(null);
+  };
+
+  const clearAuthError = () => {
+    setAuthError(null);
+    setPopupBlocked(false);
   };
 
   const isAdmin = Boolean(
@@ -189,6 +225,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         getToken,
         loginWithGoogle,
         logout,
+        clearAuthError,
       }}
     >
       {children}
