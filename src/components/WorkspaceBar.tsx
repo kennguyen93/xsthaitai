@@ -19,7 +19,6 @@ const TOOL_TABS: { id: MainTab; label: string }[] = [
   { id: 'xsmt', label: 'XSMT' },
   { id: 'tinh', label: 'Theo Tỉnh' },
   { id: 'vietlott', label: 'Vietlott' },
-  { id: 'thong-ke', label: 'Thống kê 10 năm' },
 ];
 
 const WEEKDAY_HEADERS = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];

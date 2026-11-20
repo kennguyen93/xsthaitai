@@ -404,3 +404,161 @@ export async function fetchProvinceHistoryFromPhaVNDirect(
   void DAY_NAMES_VI;
   return { province, draws };
 }
+
+function shiftDateISOClient(dateISO: string, deltaDays: number): string {
+  const [y, m, d] = dateISO.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+export async function fetchRegionHistoryFromPhaVNDirect(
+  region: 'MB' | 'MN' | 'MT' | 'ALL',
+  startDateISO: string,
+  limit = 7,
+  signal?: AbortSignal
+): Promise<{
+  region: 'MB' | 'MN' | 'MT' | 'ALL';
+  startDate: string;
+  limit: number;
+  count: number;
+  draws: DbLotteryRow[];
+}> {
+  const targetDates: string[] = [];
+  for (let i = 0; i < limit; i++) {
+    const d = shiftDateISOClient(startDateISO, -i);
+    if (d < '2016-01-01') break;
+    targetDates.push(d);
+  }
+
+  const draws: DbLotteryRow[] = [];
+  let rowId = 1;
+  const tasks: Promise<void>[] = [];
+
+  for (const dateISO of targetDates) {
+    const dow = getDayOfWeekUTC(dateISO);
+    const expectedVNDate = isoToPhaVNDate(dateISO);
+
+    if (region === 'MB' || region === 'ALL') {
+      const mbProv = XSMB_SCHEDULE[dow];
+      if (mbProv) {
+        tasks.push(
+          (async () => {
+            const params = new URLSearchParams({
+              region: 'mien-bac',
+              province: 'mien-bac',
+              date: expectedVNDate,
+            });
+            try {
+              const body = await callFixedPhaVN(params, signal);
+              if (!body || body.date !== expectedVNDate || !hasAnyValidEntry(body.prizes)) return;
+              const prizes = {
+                db: body.prizes?.db || [],
+                g1: body.prizes?.g1 || [],
+                g2: body.prizes?.g2 || [],
+                g3: body.prizes?.g3 || [],
+                g4: body.prizes?.g4 || [],
+                g5: body.prizes?.g5 || [],
+                g6: body.prizes?.g6 || [],
+                g7: body.prizes?.g7 || [],
+              };
+              const { allTails, specialTail } = extractTails(prizes);
+              draws.push({
+                id: rowId++,
+                drawDate: dateISO,
+                region: 'MB',
+                provinceCode: mbProv.code,
+                provinceName: mbProv.name,
+                kyHieu: [],
+                prizes,
+                allTails,
+                specialTail,
+                source: 'pha.vn',
+              });
+            } catch (err) {
+              if (err instanceof DOMException && err.name === 'AbortError') throw err;
+            }
+          })()
+        );
+      }
+    }
+
+    const regionalProvs: { reg: 'MN' | 'MT'; prov: { code: string; name: string } }[] = [];
+    if (region === 'MN' || region === 'ALL') {
+      for (const prov of XSMN_SCHEDULE[dow] || []) regionalProvs.push({ reg: 'MN', prov });
+    }
+    if (region === 'MT' || region === 'ALL') {
+      for (const prov of XSMT_SCHEDULE[dow] || []) regionalProvs.push({ reg: 'MT', prov });
+    }
+
+    for (const { reg, prov } of regionalProvs) {
+      const slug = CLIENT_PROVINCE_TO_PHAVN_SLUG[prov.code];
+      if (!slug) continue;
+      tasks.push(
+        (async () => {
+          const params = new URLSearchParams({
+            province: slug,
+            date: expectedVNDate,
+          });
+          try {
+            const body = await callFixedPhaVN(params, signal);
+            if (!body || body.date !== expectedVNDate || !hasAnyValidEntry(body.prizes)) return;
+            const prizes = {
+              g8: body.prizes?.g8 || [],
+              g7: body.prizes?.g7 || [],
+              g6: body.prizes?.g6 || [],
+              g5: body.prizes?.g5 || [],
+              g4: body.prizes?.g4 || [],
+              g3: body.prizes?.g3 || [],
+              g2: body.prizes?.g2 || [],
+              g1: body.prizes?.g1 || [],
+              db: body.prizes?.db || [],
+            };
+            const { allTails, specialTail } = extractTails(prizes);
+            draws.push({
+              id: rowId++,
+              drawDate: dateISO,
+              region: reg,
+              provinceCode: prov.code,
+              provinceName: prov.name,
+              kyHieu: [],
+              prizes,
+              allTails,
+              specialTail,
+              source: 'pha.vn',
+            });
+          } catch (err) {
+            if (err instanceof DOMException && err.name === 'AbortError') throw err;
+          }
+        })()
+      );
+    }
+  }
+
+  await Promise.all(tasks);
+
+  const regionOrder: Record<string, number> = { MB: 0, MN: 1, MT: 2 };
+  draws.sort((a, b) => {
+    const cmp = b.drawDate.localeCompare(a.drawDate);
+    if (cmp !== 0) return cmp;
+    return (regionOrder[a.region] ?? 9) - (regionOrder[b.region] ?? 9);
+  });
+
+  return {
+    region,
+    startDate: startDateISO,
+    limit,
+    count: draws.length,
+    draws,
+  };
+}
+
+export async function fetchXsmbHistoryFromPhaVNDirect(
+  startDateISO: string,
+  limit = 7,
+  signal?: AbortSignal
+) {
+  return fetchRegionHistoryFromPhaVNDirect('MB', startDateISO, limit, signal);
+}

@@ -11,6 +11,20 @@ export type MainTab =
   | 'thong-ke'
   | 'admin';
 
+export type StatCategoryId =
+  | 'loto-gan'
+  | 'giai-dac-biet'
+  | 'tong-hop'
+  | 'dau-duoi'
+  | 'tan-suat-xuat-hien'
+  | 'tu-00-den-99'
+  | 'cap-cung-ve'
+  | 'loto-kep'
+  | 'tan-suat-loto'
+  | 'tan-suat-cap-loto'
+  | 'dac-biet-ngay-mai'
+  | 'so-mo';
+
 export type DigitDisplayMode = 'full' | '2' | '3';
 
 export interface ProvinceInfo {

@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AdminDashboard } from './components/AdminDashboard';
 import { Header } from './components/Header';
-import { LotteryTableMultiProvince } from './components/LotteryTableMultiProvince';
-import { LotteryTableXSMB } from './components/LotteryTableXSMB';
 import { ProvinceDetailView } from './components/ProvinceDetailView';
+import { RegionHistoryView } from './components/RegionHistoryView';
 import { Sidebar } from './components/Sidebar';
 import { StatisticsView } from './components/StatisticsView';
 import { TicketChecker } from './components/TicketChecker';
@@ -19,17 +18,16 @@ import {
   DbLotteryRow,
   fetchResultsByDate,
   fetchSeoMetadata,
-  mapDbRowToProvinceDraw,
   mapDbRowToXSMB,
   SeoRow,
 } from './services/apiClient';
-import { MainTab } from './types/lottery';
+import { MainTab, StatCategoryId } from './types/lottery';
 import {
   generateHomePageJsonLd,
   generateRegionalPageJsonLd,
   generateUtilityPageJsonLd,
 } from './utils/jsonLdGenerator';
-import { formatDateISO, formatDateVN, getDayNameVN, shiftDateISO } from './utils/lotteryEngine';
+import { formatDateISO, formatDateVN, getDayNameVN } from './utils/lotteryEngine';
 import { applyDynamicSeoHead } from './utils/seoHead';
 
 const ORDERED_WEEKDAYS = [1, 2, 3, 4, 5, 6, 0];
@@ -74,42 +72,6 @@ function tabToPath(tab: MainTab, provinceSlug: string | null): string {
   }
 }
 
-function LoadingSpinner() {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label="Đang tải dữ liệu kết quả"
-      className="bg-white border border-slate-200 rounded-lg py-14 px-6 flex flex-col items-center justify-center"
-    >
-      <div className="relative w-11 h-11">
-        <svg
-          className="w-11 h-11 animate-spin text-[#C8102E]"
-          viewBox="0 0 44 44"
-          fill="none"
-          aria-hidden="true"
-        >
-          <circle
-            cx="22"
-            cy="22"
-            r="18"
-            stroke="currentColor"
-            strokeOpacity="0.15"
-            strokeWidth="4"
-          />
-          <path
-            d="M22 4a18 18 0 0 1 18 18"
-            stroke="currentColor"
-            strokeWidth="4"
-            strokeLinecap="round"
-          />
-        </svg>
-      </div>
-      <span className="sr-only">Đang tải bảng kết quả từ cơ sở dữ liệu...</span>
-    </div>
-  );
-}
-
 function getTodayVNISOClient(): string {
   try {
     const fmt = new Intl.DateTimeFormat('en-CA', {
@@ -132,13 +94,11 @@ export function App() {
 
   const [selectedDate, setSelectedDate] = useState<string>(todayISO);
   const [activeTab, setActiveTab] = useState<MainTab>(initialRoute.tab);
+  const [activeStatCategory, setActiveStatCategory] = useState<StatCategoryId>('loto-gan');
   const [provinceSlug, setProvinceSlug] = useState<string | null>(initialRoute.provinceSlug);
   const [checkerProvinceCode, setCheckerProvinceCode] = useState<string | null>(null);
 
   const [dbRows, setDbRows] = useState<DbLotteryRow[]>([]);
-  const [loadingResults, setLoadingResults] = useState<boolean>(true);
-  const [resultsError, setResultsError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState<number>(0);
   const [seoList, setSeoList] = useState<SeoRow[]>([]);
 
   useEffect(() => {
@@ -227,43 +187,25 @@ export function App() {
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    setLoadingResults(true);
-    setResultsError(null);
     fetchResultsByDate(selectedDate, controller.signal)
       .then((res) => {
         if (!active) return;
         setDbRows(res.results);
       })
-      .catch((err: unknown) => {
+      .catch(() => {
         if (!active) return;
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setResultsError(
-          err instanceof Error ? err.message : 'Không thể tải dữ liệu từ máy chủ.'
-        );
-      })
-      .finally(() => {
-        if (active) setLoadingResults(false);
+        setDbRows([]);
       });
     return () => {
       active = false;
       controller.abort();
     };
-  }, [selectedDate, reloadKey]);
+  }, [selectedDate]);
 
   const xsmbResult = useMemo(() => {
     const row = dbRows.find((r) => r.region === 'MB');
     return row ? mapDbRowToXSMB(row) : null;
   }, [dbRows]);
-
-  const xsmnResults = useMemo(
-    () => dbRows.filter((r) => r.region === 'MN').map(mapDbRowToProvinceDraw),
-    [dbRows]
-  );
-
-  const xsmtResults = useMemo(
-    () => dbRows.filter((r) => r.region === 'MT').map(mapDbRowToProvinceDraw),
-    [dbRows]
-  );
 
   const navigate = (tab: MainTab, slug: string | null = null) => {
     setActiveTab(tab);
@@ -284,13 +226,19 @@ export function App() {
     navigate('tinh', slug);
   };
 
-  const showResultsSkeleton =
-    loadingResults &&
-    (activeTab === 'home' || activeTab === 'xsmb' || activeTab === 'xsmn' || activeTab === 'xsmt');
+  const handleSelectStatCategory = (category: StatCategoryId) => {
+    setActiveStatCategory(category);
+    navigate('thong-ke');
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F4F6F9] text-slate-900">
-      <Header activeTab={activeTab} onSelectTab={(t) => navigate(t)} />
+      <Header
+        activeTab={activeTab}
+        activeStatCategory={activeStatCategory}
+        onSelectTab={(t) => navigate(t)}
+        onSelectStatCategory={handleSelectStatCategory}
+      />
 
       <WorkspaceBar
         selectedDate={selectedDate}
@@ -331,70 +279,14 @@ export function App() {
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           <div className="lg:col-span-8 space-y-6">
-            {showResultsSkeleton && <LoadingSpinner />}
-
-            {resultsError &&
-              (activeTab === 'home' ||
-                activeTab === 'xsmb' ||
-                activeTab === 'xsmn' ||
-                activeTab === 'xsmt') && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-800 flex items-center justify-between gap-3">
-                  <span>{resultsError}</span>
-                  <button
-                    type="button"
-                    onClick={() => setReloadKey((k) => k + 1)}
-                    className="px-3 py-1.5 text-xs font-semibold bg-white border border-red-300 text-red-700 hover:bg-red-100 rounded-md shrink-0 cursor-pointer"
-                  >
-                    Thử lại
-                  </button>
-                </div>
-              )}
-
-            {!showResultsSkeleton && !resultsError && activeTab === 'home' && (
+            {activeTab === 'home' && (
               <>
-                {!xsmbResult && xsmnResults.length === 0 && xsmtResults.length === 0 && (
-                  <div className="bg-white border border-slate-200 rounded-lg p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="text-sm text-slate-600">
-                      Chưa có kết quả mở thưởng cho ngày{' '}
-                      <span className="font-semibold text-slate-900">
-                        {formatDateVN(selectedDate)}
-                      </span>
-                      . Hệ thống sẽ tự động cập nhật ngay khi có giải mới từ đài quay.
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedDate(shiftDateISO(selectedDate, -1))}
-                      className="px-3 py-1.5 text-xs font-semibold text-[#C8102E] bg-red-50 hover:bg-red-100 rounded-md whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Xem ngày hôm qua
-                    </button>
-                  </div>
-                )}
-
-                {xsmbResult && (
-                  <LotteryTableXSMB
-                    result={xsmbResult}
-                    onQuickCheck={handleQuickCheckProvince}
-                  />
-                )}
-                {xsmnResults.length > 0 && (
-                  <LotteryTableMultiProvince
-                    regionLabel="Miền Nam"
-                    drawTime="16:15"
-                    dateStr={selectedDate}
-                    results={xsmnResults}
-                    onQuickCheck={handleQuickCheckProvince}
-                  />
-                )}
-                {xsmtResults.length > 0 && (
-                  <LotteryTableMultiProvince
-                    regionLabel="Miền Trung"
-                    drawTime="17:15"
-                    dateStr={selectedDate}
-                    results={xsmtResults}
-                    onQuickCheck={handleQuickCheckProvince}
-                  />
-                )}
+                <RegionHistoryView
+                  region="ALL"
+                  selectedDate={selectedDate}
+                  todayISO={todayISO}
+                  onQuickCheck={handleQuickCheckProvince}
+                />
 
                 <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
                   <div className="px-4 py-3 bg-slate-50 border-b border-slate-200">
@@ -442,29 +334,29 @@ export function App() {
               </>
             )}
 
-            {!showResultsSkeleton && !resultsError && activeTab === 'xsmb' && xsmbResult && (
-              <LotteryTableXSMB
-                result={xsmbResult}
+            {activeTab === 'xsmb' && (
+              <RegionHistoryView
+                region="MB"
+                selectedDate={selectedDate}
+                todayISO={todayISO}
                 onQuickCheck={handleQuickCheckProvince}
               />
             )}
 
-            {!showResultsSkeleton && !resultsError && activeTab === 'xsmn' && (
-              <LotteryTableMultiProvince
-                regionLabel="Miền Nam"
-                drawTime="16:15"
-                dateStr={selectedDate}
-                results={xsmnResults}
+            {activeTab === 'xsmn' && (
+              <RegionHistoryView
+                region="MN"
+                selectedDate={selectedDate}
+                todayISO={todayISO}
                 onQuickCheck={handleQuickCheckProvince}
               />
             )}
 
-            {!showResultsSkeleton && !resultsError && activeTab === 'xsmt' && (
-              <LotteryTableMultiProvince
-                regionLabel="Miền Trung"
-                drawTime="17:15"
-                dateStr={selectedDate}
-                results={xsmtResults}
+            {activeTab === 'xsmt' && (
+              <RegionHistoryView
+                region="MT"
+                selectedDate={selectedDate}
+                todayISO={todayISO}
                 onQuickCheck={handleQuickCheckProvince}
               />
             )}
@@ -477,7 +369,9 @@ export function App() {
               />
             )}
 
-            {activeTab === 'vietlott' && <VietlottView selectedDate={selectedDate} />}
+            {activeTab === 'vietlott' && (
+              <VietlottView selectedDate={selectedDate} todayISO={todayISO} />
+            )}
 
             {activeTab === 'do-ve-so' && (
               <TicketChecker
@@ -487,7 +381,13 @@ export function App() {
               />
             )}
 
-            {activeTab === 'thong-ke' && <StatisticsView selectedDate={selectedDate} />}
+            {activeTab === 'thong-ke' && (
+              <StatisticsView
+                selectedDate={selectedDate}
+                activeCategory={activeStatCategory}
+                onSelectCategory={setActiveStatCategory}
+              />
+            )}
 
             {activeTab === 'admin' && <AdminDashboard />}
           </div>

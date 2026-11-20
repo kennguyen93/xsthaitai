@@ -9,6 +9,7 @@ import type {
 import { getDayNameVN } from '../utils/lotteryEngine';
 import {
   fetchProvinceHistoryFromPhaVNDirect,
+  fetchRegionHistoryFromPhaVNDirect,
   fetchResultsFromPhaVNDirect,
   getStaticProvincesList,
 } from './phavnDirectClient';
@@ -226,6 +227,40 @@ export interface ServerStatisticsData {
     avgSpecialSum: number;
     topPair: string;
   }[];
+  coOccurrences: {
+    pairA: string;
+    pairB: string;
+    count: number;
+    lastDate: string;
+  }[];
+  mirrorPairs: {
+    pairA: string;
+    pairB: string;
+    pairLabel: string;
+    totalCount: number;
+    daysSinceLast: number;
+    maxGap: number;
+    lastSeenDate: string;
+  }[];
+  recentDays: {
+    drawDate: string;
+    tails: string[];
+    specialTail: string;
+  }[];
+  nextDaySpecial: {
+    triggerTail: string;
+    triggerDate: string;
+    sampleCount: number;
+    nextTails: { pair: string; count: number }[];
+    nextHeads: { digit: string; count: number }[];
+    nextTailsDigit: { digit: string; count: number }[];
+    history: {
+      triggerDate: string;
+      nextDate: string;
+      nextSpecial: string;
+      nextTail: string;
+    }[];
+  };
   cacheStatus: string;
 }
 
@@ -469,6 +504,36 @@ export async function fetchProvinceHistory(slug: string, limit = 10) {
   }
 }
 
+export async function fetchRegionHistory(
+  region: 'MB' | 'MN' | 'MT' | 'ALL',
+  startDate: string,
+  limit = 7,
+  signal?: AbortSignal
+) {
+  try {
+    return await fetchJsonWithRetry<{
+      region: 'MB' | 'MN' | 'MT' | 'ALL';
+      startDate: string;
+      limit: number;
+      count: number;
+      draws: DbLotteryRow[];
+    }>(
+      `/api/results/region/${region}?date=${encodeURIComponent(startDate)}&limit=${limit}`,
+      'Không thể tải danh sách kết quả xổ số.',
+      signal
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      return fetchRegionHistoryFromPhaVNDirect(region, startDate, limit, signal);
+    }
+    throw err;
+  }
+}
+
+export async function fetchXsmbHistory(startDate: string, limit = 7, signal?: AbortSignal) {
+  return fetchRegionHistory('MB', startDate, limit, signal);
+}
+
 export async function fetchVietlottByDate(date: string) {
   try {
     return await fetchJsonWithRetry<{ date: string; results: DbVietlottRow[] }>(
@@ -478,6 +543,30 @@ export async function fetchVietlottByDate(date: string) {
   } catch (err: unknown) {
     if (err instanceof ApiNotFoundError) {
       return { date, results: [] };
+    }
+    throw err;
+  }
+}
+
+export async function fetchVietlottHistory(
+  startDate: string,
+  limit = 7,
+  signal?: AbortSignal
+) {
+  try {
+    return await fetchJsonWithRetry<{
+      startDate: string;
+      limit: number;
+      count: number;
+      results: DbVietlottRow[];
+    }>(
+      `/api/vietlott/history?date=${encodeURIComponent(startDate)}&limit=${limit}`,
+      'Không thể tải danh sách kết quả Vietlott.',
+      signal
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      return { startDate, limit, count: 0, results: [] as DbVietlottRow[] };
     }
     throw err;
   }
