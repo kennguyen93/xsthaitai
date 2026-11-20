@@ -171,7 +171,9 @@ export const AdminDashboard: React.FC = () => {
   const {
     firebaseUser,
     profile,
+    isAdmin,
     loading,
+    signingIn,
     authError,
     popupBlocked,
     inIframe,
@@ -327,11 +329,12 @@ export const AdminDashboard: React.FC = () => {
         <div className="flex flex-wrap items-center justify-center gap-2.5">
           <button
             type="button"
+            disabled={signingIn}
             onClick={loginWithGoogle}
-            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-[#C8102E] hover:bg-[#A60D26] rounded-md cursor-pointer"
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-[#C8102E] hover:bg-[#A60D26] disabled:opacity-60 disabled:cursor-wait rounded-md cursor-pointer"
           >
             <LogIn className="w-4 h-4" />
-            Đăng nhập bằng Google
+            {signingIn ? 'Đang xác nhận Google...' : 'Đăng nhập bằng Google'}
           </button>
           {(popupBlocked || inIframe) && (
             <a
@@ -349,7 +352,7 @@ export const AdminDashboard: React.FC = () => {
     );
   }
 
-  if (!profile || profile.role !== 'admin') {
+  if (!isAdmin) {
     return (
       <section className="bg-white border border-slate-200 rounded-lg p-6 max-w-xl mx-auto space-y-3">
         <div className="flex items-center gap-2 text-amber-700 font-bold">
@@ -359,6 +362,33 @@ export const AdminDashboard: React.FC = () => {
         <p className="text-sm text-slate-600">
           Bạn đang đăng nhập với tài khoản <span className="font-semibold">{firebaseUser.email}</span>.
           Khu vực Quản trị chỉ dành riêng cho tài khoản <span className="font-semibold">kennguyen931908@gmail.com</span>.
+        </p>
+        <button
+          type="button"
+          onClick={logout}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          Đăng xuất
+        </button>
+      </section>
+    );
+  }
+
+  if (!profile || profile.role !== 'admin') {
+    return (
+      <section className="bg-white border border-slate-200 rounded-lg p-6 max-w-xl mx-auto space-y-3">
+        <div className="flex items-center gap-2 text-slate-900 font-bold">
+          <ShieldAlert className="w-5 h-5 text-[#C8102E]" />
+          <span>Đã đăng nhập Quản trị ({firebaseUser.email})</span>
+        </div>
+        <p className="text-sm text-slate-600">
+          Tên miền hiện tại đang chạy bản giao diện tĩnh (không có máy chủ API PostgreSQL kèm theo), nên các tính năng quản trị cơ sở dữ liệu và kho 10 API Key chưa khả dụng tại đây. Dữ liệu kết quả vẫn đang tải trực tiếp từ{' '}
+          <span className="font-mono font-semibold text-slate-800">https://pha.vn/api/v1/traditional</span>.
+        </p>
+        <p className="text-xs text-slate-500">
+          Để quản lý 10 mục Key và đồng bộ máy chủ, vui lòng truy cập máy chủ Node.js chính hoặc cấu hình biến{' '}
+          <span className="font-mono">VITE_API_BASE_URL</span> trỏ về backend.
         </p>
         <button
           type="button"
