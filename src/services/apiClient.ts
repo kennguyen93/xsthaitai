@@ -7,6 +7,33 @@ import type {
   XSMBResult,
 } from '../types/lottery';
 import { getDayNameVN } from '../utils/lotteryEngine';
+import {
+  fetchProvinceHistoryFromPhaVNDirect,
+  fetchResultsFromPhaVNDirect,
+  getStaticProvincesList,
+} from './phavnDirectClient';
+
+const CONFIGURED_API_BASE = (import.meta.env.VITE_API_BASE_URL || '')
+  .trim()
+  .replace(/\/+$/, '');
+
+let backendApiUnavailable = false;
+
+export function resolveApiUrl(apiPath: string): string {
+  if (!CONFIGURED_API_BASE) return apiPath;
+  return `${CONFIGURED_API_BASE}${apiPath.startsWith('/') ? apiPath : `/${apiPath}`}`;
+}
+
+export function isBackendApiUnavailable(): boolean {
+  return backendApiUnavailable;
+}
+
+class ApiNotFoundError extends Error {
+  constructor() {
+    super('Backend API endpoint not found on this domain');
+    this.name = 'ApiNotFoundError';
+  }
+}
 
 export interface DbLotteryRow {
   id: number;
@@ -235,11 +262,16 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 async function fetchJsonWithRetry<T>(
-  url: string,
+  apiPath: string,
   errorMessage: string,
   signal?: AbortSignal,
   maxRetries = 5
 ): Promise<T> {
+  if (backendApiUnavailable) {
+    throw new ApiNotFoundError();
+  }
+
+  const url = resolveApiUrl(apiPath);
   const retryDelays = [700, 1200, 1800, 2500, 3200];
   let lastErr: unknown;
 
@@ -252,9 +284,22 @@ async function fetchJsonWithRetry<T>(
       const contentType = res.headers.get('content-type') || '';
       const isJson = contentType.includes('application/json');
 
-      // Nginx returns /warmup.html (200 or 502/503/504 text/html) while backend is starting
       if (res.ok && isJson) {
         return (await res.json()) as T;
+      }
+
+      // Static host / other domain without Express /api/* returns non-JSON 404/405 or SPA index.html
+      if ((res.status === 404 || res.status === 405) && !isJson) {
+        backendApiUnavailable = true;
+        throw new ApiNotFoundError();
+      }
+
+      if (res.ok && !isJson) {
+        const htmlSample = await res.text().catch(() => '');
+        if (htmlSample.includes('id="root"') || htmlSample.includes("id='root'")) {
+          backendApiUnavailable = true;
+          throw new ApiNotFoundError();
+        }
       }
 
       const isTransientHtmlOr5xx = !isJson || res.status >= 500;
@@ -273,6 +318,9 @@ async function fetchJsonWithRetry<T>(
 
       lastErr = new Error(errorMessage);
     } catch (err: unknown) {
+      if (err instanceof ApiNotFoundError) {
+        throw err;
+      }
       if (err instanceof DOMException && err.name === 'AbortError') {
         throw err;
       }
@@ -295,32 +343,61 @@ async function fetchJsonWithRetry<T>(
 }
 
 export async function fetchResultsByDate(date: string, signal?: AbortSignal) {
-  return fetchJsonWithRetry<{ date: string; count: number; results: DbLotteryRow[] }>(
-    `/api/results?date=${encodeURIComponent(date)}`,
-    'Không thể tải kết quả xổ số từ máy chủ.',
-    signal
-  );
+  try {
+    return await fetchJsonWithRetry<{ date: string; count: number; results: DbLotteryRow[] }>(
+      `/api/results?date=${encodeURIComponent(date)}`,
+      'Không thể tải kết quả xổ số từ máy chủ.',
+      signal
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      // Fixed official external source on any domain without backend: https://pha.vn/api/v1/traditional
+      return fetchResultsFromPhaVNDirect(date, signal);
+    }
+    throw err;
+  }
 }
 
 export async function fetchProvinces(): Promise<DbProvinceRow[]> {
-  return fetchJsonWithRetry<DbProvinceRow[]>(
-    '/api/provinces',
-    'Không thể tải danh sách tỉnh.'
-  );
+  try {
+    return await fetchJsonWithRetry<DbProvinceRow[]>(
+      '/api/provinces',
+      'Không thể tải danh sách tỉnh.'
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      return getStaticProvincesList();
+    }
+    throw err;
+  }
 }
 
 export async function fetchProvinceHistory(slug: string, limit = 10) {
-  return fetchJsonWithRetry<{ province: DbProvinceRow; draws: DbLotteryRow[] }>(
-    `/api/results/province/${encodeURIComponent(slug)}?limit=${limit}`,
-    'Không thể tải lịch sử kết quả tỉnh.'
-  );
+  try {
+    return await fetchJsonWithRetry<{ province: DbProvinceRow; draws: DbLotteryRow[] }>(
+      `/api/results/province/${encodeURIComponent(slug)}?limit=${limit}`,
+      'Không thể tải lịch sử kết quả tỉnh.'
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      return fetchProvinceHistoryFromPhaVNDirect(slug, limit);
+    }
+    throw err;
+  }
 }
 
 export async function fetchVietlottByDate(date: string) {
-  return fetchJsonWithRetry<{ date: string; results: DbVietlottRow[] }>(
-    `/api/vietlott?date=${encodeURIComponent(date)}`,
-    'Không thể tải kết quả Vietlott.'
-  );
+  try {
+    return await fetchJsonWithRetry<{ date: string; results: DbVietlottRow[] }>(
+      `/api/vietlott?date=${encodeURIComponent(date)}`,
+      'Không thể tải kết quả Vietlott.'
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      return { date, results: [] };
+    }
+    throw err;
+  }
 }
 
 export async function fetchStatistics(
@@ -335,13 +412,23 @@ export async function fetchStatistics(
     days: String(days),
   });
   if (provinceCode) params.set('provinceCode', provinceCode);
-  return fetchJsonWithRetry<ServerStatisticsData>(
-    `/api/statistics?${params.toString()}`,
-    'Không thể tải dữ liệu thống kê.'
-  );
+  try {
+    return await fetchJsonWithRetry<ServerStatisticsData>(
+      `/api/statistics?${params.toString()}`,
+      'Không thể tải dữ liệu thống kê.'
+    );
+  } catch (err: unknown) {
+    if (err instanceof ApiNotFoundError) {
+      throw new Error(
+        'Thống kê dữ liệu lịch sử yêu cầu kết nối máy chủ backend (cấu hình VITE_API_BASE_URL hoặc chạy kèm Express server).'
+      );
+    }
+    throw err;
+  }
 }
 
 export async function fetchSeoMetadata(): Promise<SeoRow[]> {
+  if (backendApiUnavailable) return [];
   try {
     return await fetchJsonWithRetry<SeoRow[]>('/api/seo', 'Không thể tải cấu hình SEO.', undefined, 2);
   } catch {
@@ -350,6 +437,7 @@ export async function fetchSeoMetadata(): Promise<SeoRow[]> {
 }
 
 export async function fetchActiveAds(): Promise<AdRow[]> {
+  if (backendApiUnavailable) return [];
   try {
     return await fetchJsonWithRetry<AdRow[]>('/api/ads', 'Không thể tải quảng cáo.', undefined, 2);
   } catch {

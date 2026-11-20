@@ -19,7 +19,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import type { AdRow, DbLotteryRow, SeoRow } from '../services/apiClient';
+import { resolveApiUrl, type AdRow, type DbLotteryRow, type SeoRow } from '../services/apiClient';
 import { formatDateVN, getTodayISOClient } from '../utils/dateHelpers';
 
 interface AutoSyncState {
@@ -222,7 +222,7 @@ export const AdminDashboard: React.FC = () => {
     async (url: string, init?: RequestInit) => {
       const token = await getToken();
       if (!token) throw new Error('Chưa đăng nhập.');
-      const res = await fetch(url, {
+      const res = await fetch(resolveApiUrl(url), {
         ...init,
         headers: {
           'Content-Type': 'application/json',
@@ -1201,7 +1201,7 @@ export const AdminDashboard: React.FC = () => {
                 Nguồn API Chính Thức Duy Nhất: https://pha.vn/api/v1/traditional
               </h3>
               <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-700 rounded">
-                Chỉ lấy từ pha.vn
+                Cố định pha.vn trên mọi tên miền
               </span>
             </div>
 

@@ -114,6 +114,14 @@ export const VietlottView: React.FC<VietlottViewProps> = ({ selectedDate }) => {
     );
   }
 
+  if (!mega && !power && !max3d) {
+    return (
+      <div className="bg-white border border-slate-200 rounded-lg p-6 text-center text-sm text-slate-600">
+        Chưa có dữ liệu kết quả Vietlott cho ngày {formatDateVN(selectedDate)}.
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {power && (

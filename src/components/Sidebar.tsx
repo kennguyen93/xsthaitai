@@ -6,7 +6,9 @@ import {
   fetchActiveAds,
   fetchProvinces,
   fetchVietlottByDate,
+  isBackendApiUnavailable,
   mapVietlottRows,
+  resolveApiUrl,
 } from '../services/apiClient';
 import { MainTab, RegionKey } from '../types/lottery';
 import {
@@ -285,7 +287,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <a
             href={ad.targetUrl}
             onClick={(e) => {
-              fetch(`/api/ads/${ad.id}/click`, { method: 'POST' }).catch(() => {});
+              if (!isBackendApiUnavailable()) {
+                fetch(resolveApiUrl(`/api/ads/${ad.id}/click`), { method: 'POST' }).catch(() => {});
+              }
               if (ad.targetUrl.startsWith('/')) {
                 e.preventDefault();
                 if (ad.targetUrl === '/do-ve-so') onSelectTab('do-ve-so');
