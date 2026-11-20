@@ -166,6 +166,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
 
+    // Proactively initialize Firebase's popup/iframe bridge on ALL browsers (including Desktop Chrome)
+    // so signInWithPopup does not stall on network I/O during click.
+    const internalAuth = auth as unknown as {
+      _popupRedirectResolver?: { _initialize?: (a: typeof auth) => Promise<unknown> };
+    };
+    if (typeof internalAuth._popupRedirectResolver?._initialize === 'function') {
+      internalAuth._popupRedirectResolver._initialize(auth).catch(() => {});
+    }
+
     if (!inIframe) {
       getRedirectResult(auth, browserPopupRedirectResolver).catch((err: unknown) => {
         console.error('[Auth] Redirect result error:', err);
@@ -210,7 +219,56 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSigningIn(true);
     setAuthError(null);
     setPopupBlocked(false);
+
+    // Open the popup synchronously inside the user-click event so Chrome/Edge/Safari
+    // do not expire the user-gesture token while Firebase initializes its auth bridge.
+    const width = 500;
+    const height = 600;
+    const top = Math.max((window.screen.availHeight - height) / 2, 0);
+    const left = Math.max((window.screen.availWidth - width) / 2, 0);
+    const specs = `location=yes,resizable=yes,statusbar=yes,toolbar=no,scrollbars=yes,width=${width},height=${height},top=${top},left=${left}`;
+
+    let preOpenedPopup: Window | null = null;
+    let popupConsumed = false;
+    const originalWindowOpen = window.open;
+
     try {
+      preOpenedPopup = originalWindowOpen.call(window, 'about:blank', 'xsthantai_google_auth', specs);
+      if (!preOpenedPopup) {
+        const formatted = formatFirebaseAuthError({ code: 'auth/popup-blocked' }, inIframe);
+        setPopupBlocked(formatted.popupBlocked);
+        setAuthError(formatted.message);
+        return;
+      }
+
+      try {
+        preOpenedPopup.document.title = 'Đang kết nối đăng nhập Google...';
+        preOpenedPopup.document.body.innerHTML =
+          '<div style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:90vh;color:#334155;font-size:14px;">Đang kết nối tới Google để xác nhận tài khoản...</div>';
+      } catch {
+        // Ignore cross-origin or restricted document write errors
+      }
+
+      window.open = function patchedOpen(
+        url?: string | URL,
+        target?: string,
+        features?: string
+      ): Window | null {
+        const urlStr = typeof url === 'string' ? url : url ? url.toString() : '';
+        if (urlStr.includes('/__/auth/handler') && preOpenedPopup && !preOpenedPopup.closed) {
+          popupConsumed = true;
+          window.open = originalWindowOpen;
+          try {
+            preOpenedPopup.location.replace(urlStr);
+            preOpenedPopup.focus();
+          } catch {
+            preOpenedPopup.location.href = urlStr;
+          }
+          return preOpenedPopup;
+        }
+        return originalWindowOpen.call(window, url, target, features);
+      };
+
       await signInWithPopup(auth, googleAuthProvider, browserPopupRedirectResolver);
     } catch (err: unknown) {
       console.error('[Auth] Google signInWithPopup failed:', err);
@@ -218,6 +276,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setPopupBlocked(formatted.popupBlocked);
       setAuthError(formatted.message);
     } finally {
+      window.open = originalWindowOpen;
+      if (preOpenedPopup && !popupConsumed && !preOpenedPopup.closed) {
+        try {
+          preOpenedPopup.close();
+        } catch {
+          // Ignore close errors
+        }
+      }
       signingInRef.current = false;
       setSigningIn(false);
     }
